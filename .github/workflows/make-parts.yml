@@ -29,8 +29,8 @@ jobs:
       FLIP: "mirror"            # "none", "mirror" (left-right), "upsidedown", or "both"
       AUTO_SUBTITLES: "on"      # "on" = make English subtitles from the audio when there's no .srt, "off" = don't
       WHISPER_MODEL: "small"    # speech model: "base" (faster), "small" (good), "medium" (best but slow)
-      LINE: "on"                # a short thin black line on the movie (near its bottom), sliding left and right
-      LINE_WIDTH: "360"         # its length in pixels (the video is 1080 wide)
+      LINE: "on"                # a thin, see-through black line right across the picture (near its bottom), not moving
+      LINE_OPACITY: "0.45"      # how dark the line is: 1 = solid black, 0.2 = very faint
       LINE_THICKNESS: "1"       # its thickness in pixels
       COCKROACH: "on"           # a little cockroach scuttles across the screen at a random moment
       COCKROACH_CHANCE: "1"     # chance each part gets one (1 = every part, 0.5 = half of them)

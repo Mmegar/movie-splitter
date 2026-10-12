@@ -73,7 +73,7 @@ COCKROACH = os.environ.get("COCKROACH", "on").strip().lower() not in ("off", "no
 COCKROACH_CHANCE = float(os.environ.get("COCKROACH_CHANCE", "1"))   # chance a part gets a cockroach run
 COCKROACH_SIZE = int(os.environ.get("COCKROACH_SIZE", "100"))         # length in pixels (screen is 1080 wide)
 LINE = os.environ.get("LINE", "on").strip().lower() not in ("off", "no", "0", "false")
-LINE_WIDTH = int(os.environ.get("LINE_WIDTH", "360"))       # pixels (screen is 1080 wide)
+LINE_OPACITY = float(os.environ.get("LINE_OPACITY", "0.45"))  # 1 = solid black, 0.2 = very faint
 LINE_THICKNESS = int(os.environ.get("LINE_THICKNESS", "5"))
 ASSETS = Path(__file__).resolve().parent / "assets"
 AUTO_SUBS = os.environ.get("AUTO_SUBTITLES", "on").strip().lower() not in ("off", "no", "0", "false")
@@ -684,30 +684,32 @@ def movie_bottom(src):
 
 
 def line_filter(src, length):
-    """A short thin black line on the movie, near its bottom, that slowly slides left and right."""
+    """A thin, see-through black line right across the picture, near its bottom. It doesn't move."""
     if not LINE:
         return ";[txt0]null[txt]"
-    y = min(1860.0, movie_bottom(src) - 40)
-    period = random.uniform(5, 8)
-    x = f"(W-w)/2+(W-w)/2*0.75*sin(2*PI*t/{period:.2f}+{random.uniform(0, 6.28):.2f})"
-    return (f";color=c=black:s={LINE_WIDTH}x{LINE_THICKNESS}:r=30:d={length:.3f},format=rgba[ln];"
-            f"[txt0][ln]overlay=x='{x}':y={y:.0f}:eval=frame[txt]")
+    bottom = movie_bottom(src)
+    y = min(1860.0, bottom - 40)
+    return (f";[txt0]drawbox=x=0:y={y:.0f}:w=iw:h={LINE_THICKNESS}:"
+            f"color=black@{LINE_OPACITY:g}:t=fill[txt]")
 
 
-def cockroach_filter(length):
+def cockroach_filter(length, src):
     """
-    Picks a random moment and a random path across the whole 1080x1920 screen.
+    Picks a random moment and a random path that crawls across the movie picture itself
+    (in from one side of the screen, out the other).
     Returns (extra ffmpeg inputs, filter text from [txt] to [v]) or None.
     """
     if not COCKROACH or random.random() > COCKROACH_CHANCE:
         return None
-    W, H, margin = 1080, 1920, COCKROACH_SIZE
-    def edge_point(edge):
-        return {0: (random.uniform(100, W - 100), -margin), 1: (W + margin, random.uniform(300, H - 300)),
-                2: (random.uniform(100, W - 100), H + margin), 3: (-margin, random.uniform(300, H - 300))}[edge]
-    e = random.randrange(4)
-    x0, y0 = edge_point(e)
-    x1, y1 = edge_point((e + random.choice([1, 2, 2, 3])) % 4)
+    W, margin = 1080, COCKROACH_SIZE
+    bottom = movie_bottom(src)
+    top = 1920 - bottom
+    pad = min(60.0, (bottom - top) * 0.15)
+    band = (top + pad, bottom - pad)                     # stay on the picture
+    x0, x1 = -margin, W + margin
+    if random.random() < 0.5:
+        x0, x1 = x1, x0
+    y0, y1 = random.uniform(*band), random.uniform(*band)
     dist = math.hypot(x1 - x0, y1 - y0)
     secs = dist / random.uniform(170, 260)
     if length < secs + 2:
@@ -798,7 +800,7 @@ def render_part(src, start, end, number, cues, out_path, workdir):
         "[txt0]"
     )
     filters += line_filter(src, end - start)
-    roach = cockroach_filter(end - start)
+    roach = cockroach_filter(end - start, src)
     extra_inputs = roach[0] if roach else []
     filters += roach[1] if roach else ";[txt]null[v]"
     run([
@@ -837,10 +839,9 @@ def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None, m
     candidates = quiet + subtitle_gaps(cues)
     score = interest_scores(loud, motion, cuts, cues)
 
-    results = {}
+    plans = []
     for mode in modes:
         MODE = mode
-        reset_flip()
         if mode == "all":
             parts = choose_cuts(total, candidates)
         elif mode == "stretch":
@@ -862,7 +863,13 @@ def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None, m
         list_file = mdir / "_parts list.txt"
         list_file.write_text("\n".join([name, f"Mode: {label}", ""] + lines) + "\n", encoding="utf-8")
         if on_plan:
-            on_plan(mode, len(parts), list_file)
+            on_plan(mode, len(parts), list_file)       # creates this mode's subfolder right away
+        plans.append((mode, parts, lines, mdir, width, label))
+
+    results = {}
+    for mode, parts, lines, mdir, width, label in plans:
+        MODE = mode
+        reset_flip()
         files = []
         for i, ((a, b, _), line) in enumerate(zip(parts, lines), 1):
             out = mdir / f"{name} - Part {str(i).zfill(width)}.mp4"
@@ -992,7 +999,9 @@ def process_video(video, all_names):
 
     def on_plan(mode, count, list_file):
         run(["rclone", "copyto", str(list_file), f"{dest}/{MODE_NAMES[mode]}/{list_file.name}"])
-        notify(f"{name}: {count} part{'s' if count != 1 else ''} planned", f"Making Part 1 of {count} now.", ["scissors"])
+        notify(f"{name}: {count} part{'s' if count != 1 else ''} planned",
+               f"The parts list is in {READY}/{name}/{MODE_NAMES[mode]}. Parts will appear there as they're made.",
+               ["scissors"])
 
     def on_part(mode, i, count, out, line):
         folder = f"{READY}/{name}/{MODE_NAMES[mode]}"
