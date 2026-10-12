@@ -1,0 +1,29 @@
+name: Inspect newest part (temporary)
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    env:
+      RCLONE_CONFIG_GDRIVE_TYPE: drive
+      RCLONE_CONFIG_GDRIVE_SCOPE: drive
+      RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: "1nk5jCp9xOYGOO1m4KUPKqSUdtQOGfUFf"
+      RCLONE_CONFIG_GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+      RCLONE_CONFIG_GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+      RCLONE_CONFIG_GDRIVE_TOKEN: '{"access_token":"","token_type":"Bearer","refresh_token":"${{ secrets.GDRIVE_REFRESH_TOKEN }}","expiry":"2000-01-01T00:00:00Z"}'
+    steps:
+      - run: curl -fsSL https://rclone.org/install.sh | sudo bash && sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Grab frames from the newest part
+        run: |
+          F=$(rclone lsjson -R "gdrive:Ready to post" --files-only | python3 -c "import json,sys;fs=[f for f in json.load(sys.stdin) if f['Path'].endswith('.mp4')];print(max(fs,key=lambda f:f['ModTime'])['Path'])")
+          echo "::notice::Newest part: $F"
+          rclone copyto "gdrive:Ready to post/$F" p.mp4
+          mkdir sheets
+          ffmpeg -loglevel error -i p.mp4 -vf "fps=2,scale=216:384,tile=10x15" -frames:v 1 sheets/sheet.png
+      - name: Save to a temporary branch
+        run: |
+          cd sheets && git init -q && git checkout -q -b inspect-output
+          git config user.name test && git config user.email test@example.com
+          git add . && git commit -qm frames
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" inspect-output
