@@ -62,6 +62,8 @@ LATEST = float(os.environ.get("CUT_LATEST", "15"))               # ...or this la
 HIGHLIGHT_SECONDS = float(os.environ.get("HIGHLIGHT_SECONDS", "75"))  # "highlights" mode: clip length
 HIGHLIGHT_COUNT = int(os.environ.get("HIGHLIGHT_COUNT", "0"))    # 0 = automatic (about 1 per 10 min)
 MIN_LAST_PART = 30
+MAX_EXTRA = float(os.environ.get("PART_MAX_EXTRA", "225"))  # a part may run this many seconds long to end well
+GOOD_ENDING = 3.0   # an ending at least this good is taken as soon as one turns up
 FLIP = os.environ.get("FLIP", "none").strip().lower()             # none / mirror / upsidedown / both
 FLIP_FILTERS = {"mirror": "hflip", "upsidedown": "vflip", "both": "hflip,vflip"}
 # FLIP_EVERY: "25-30" = switch on a scene cut every 25 to 30 seconds (random each time); "30" = every 30s;
@@ -449,7 +451,49 @@ def quiet_moments(path):
     )
     starts = [float(x) for x in re.findall(r"silence_start: ([\d.]+)", res.stderr)]
     ends = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", res.stderr)]
+    QUIET_LEN[:] = [((s + e) / 2, e - s) for s, e in zip(starts, ends)]
     return [(s + e) / 2 for s, e in zip(starts, ends)]
+
+
+QUIET_LEN = []     # (middle of pause, pause length) from the last quiet_moments() call
+ENDINGS = []       # (time, how good an ending it is), built per movie by build_endings()
+
+
+def build_endings(cues, cuts):
+    """
+    Scores every possible place to end a part. A good ending is a pause, after someone
+    finishes a sentence, ideally where the scene also changes.
+    """
+    cut_times = [i + 0.5 for i, c in enumerate(cuts) if c]
+    sentence_ends = [(a[1] + b[0]) / 2 for a, b in zip(cues, cues[1:])
+                     if b[0] - a[1] >= 0.3 and a[2].rstrip()[-1:] in ".?!"]
+    points = {}
+    for t, length in QUIET_LEN:
+        points[round(t, 1)] = min(length, 2.0)                       # longer pause = better
+    for t in sentence_ends:
+        points[round(t, 1)] = points.get(round(t, 1), 0.5) + 2.0     # finished sentence = much better
+    for t in cut_times:
+        points.setdefault(round(t, 1), 0.3)                          # a plain scene change is okay
+    for t in list(points):
+        if any(abs(t - c) <= 1.0 for c in cut_times):
+            points[t] += 1.5                                         # pause + scene change = great
+    ENDINGS[:] = sorted(points.items())
+
+
+def best_end(target, before, after):
+    """
+    Where to end a part aimed at `target`: the first really good ending (finished sentence /
+    clear pause / scene change) from target-before onwards, up to target+after. If there's
+    no really good one, the best one nearby.
+    """
+    window = [(t, q) for t, q in ENDINGS if target - before <= t <= target + after]
+    if not window:
+        return target
+    for t, q in window:
+        if q >= GOOD_ENDING:
+            return t
+    near = [(t, q) for t, q in window if t <= target + 30] or window
+    return max(near, key=lambda tq: tq[1] - 0.04 * abs(tq[0] - target))[0]
 
 
 def subtitle_gaps(cues):
@@ -530,7 +574,7 @@ def choose_highlights(total, score, candidates):
     windows.sort(reverse=True)
 
     picked = []
-    gap = 10
+    gap = 10 + MAX_EXTRA          # room for a clip to run long without overlapping the next
     for avg, s in windows:
         if len(picked) >= count:
             break
@@ -539,7 +583,7 @@ def choose_highlights(total, score, candidates):
     clips = []
     for avg, s in sorted(picked, key=lambda p: p[1]):
         a = snap(float(s), candidates, 8, 3)
-        b = snap(float(s + L), candidates, 5, 8)
+        b = best_end(float(s + L), 5, MAX_EXTRA)
         clips.append((max(0.0, a), min(total, b), avg))
     return clips
 
@@ -547,12 +591,12 @@ def choose_highlights(total, score, candidates):
 def choose_cuts(total, candidates, part=None, begin=0.0):
     """Back-to-back parts of ~part seconds from begin to total. Returns [(start, end, None)]."""
     part = part or PART_SECONDS
-    early, late = min(EARLIEST, part * 0.3), min(LATEST, part * 0.2)
+    early, late = min(EARLIEST, part * 0.15, 10.0), MAX_EXTRA
     candidates = sorted(candidates)
     cuts, pos = [], begin
     while total - pos > part + late:
         target = pos + part
-        cut = snap(target, candidates, early, late)
+        cut = best_end(target, early, late) if ENDINGS else snap(target, candidates, early, late)
         cuts.append((pos, cut, None))
         pos = cut
     if cuts and total - pos < min(MIN_LAST_PART, part * 0.5):
@@ -577,7 +621,7 @@ def choose_stretch(total, score, candidates):
         if avg > best:
             best, best_s = avg, s
     a = max(0.0, snap(float(best_s), candidates, 20, 5))
-    b = min(total, snap(float(best_s + L), candidates, 5, 20))
+    b = min(total, best_end(float(best_s + L), 5, MAX_EXTRA) if ENDINGS else snap(float(best_s + L), candidates, 5, 20))
     print(f"Best stretch: {fmt_time(a)} to {fmt_time(b)} (interest score {best * 100:.0f}/100)", flush=True)
     return choose_cuts(b, candidates, STRETCH_PART_SECONDS, a)
 
@@ -855,6 +899,7 @@ def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None, m
         except Exception as e:
             print(f"(no automatic subtitles: {e})", flush=True)
     candidates = quiet + subtitle_gaps(cues)
+    build_endings(cues, cuts)
     score = interest_scores(loud, motion, cuts, cues)
 
     plans = []
