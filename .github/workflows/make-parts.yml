@@ -1,0 +1,38 @@
+name: Make TikTok parts
+
+on:
+  schedule:
+    - cron: "17 14 * * *"   # once a day, about 3am New Zealand time (GitHub may start it a little late)
+  workflow_dispatch:         # "Run workflow" button to start it by hand
+
+concurrency:
+  group: make-parts
+  cancel-in-progress: false
+
+jobs:
+  make-parts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      # ---- settings you can change ----
+      PART_SECONDS: "120"   # target length of each part (2 minutes)
+      CUT_EARLIEST: "25"    # may end a part up to 25s early to land on a pause...
+      CUT_LATEST: "15"      # ...or up to 15s late
+      # ---- Google Drive: the "TikTok automation" folder ----
+      RCLONE_CONFIG_GDRIVE_TYPE: drive
+      RCLONE_CONFIG_GDRIVE_SCOPE: drive
+      RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: "1nk5jCp9xOYGOO1m4KUPKqSUdtQOGfUFf"
+      RCLONE_CONFIG_GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+      RCLONE_CONFIG_GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+      RCLONE_CONFIG_GDRIVE_TOKEN: '{"access_token":"","token_type":"Bearer","refresh_token":"${{ secrets.GDRIVE_REFRESH_TOKEN }}","expiry":"2000-01-01T00:00:00Z"}'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rclone
+        run: curl -fsSL https://rclone.org/install.sh | sudo bash
+
+      - name: Check Google Drive connection
+        run: rclone lsd gdrive:
+
+      - name: Make parts
+        run: python3 process.py
