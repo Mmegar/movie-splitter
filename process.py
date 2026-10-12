@@ -42,6 +42,8 @@ LATEST = float(os.environ.get("CUT_LATEST", "15"))               # ...or this la
 HIGHLIGHT_SECONDS = float(os.environ.get("HIGHLIGHT_SECONDS", "75"))  # "highlights" mode: clip length
 HIGHLIGHT_COUNT = int(os.environ.get("HIGHLIGHT_COUNT", "0"))    # 0 = automatic (about 1 per 10 min)
 MIN_LAST_PART = 30
+FLIP = os.environ.get("FLIP", "none").strip().lower()             # none / mirror / upsidedown / both
+FLIP_FILTERS = {"mirror": "hflip,", "upsidedown": "vflip,", "both": "hflip,vflip,"}
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()               # phone notifications (ntfy app)
 MAX_RUN_MINUTES = float(os.environ.get("MAX_RUN_MINUTES", "300"))  # don't start a new movie after this
 STARTED = time.time()
@@ -344,8 +346,9 @@ def choose_cuts(total, candidates):
 
 # ---------------------------------------------------------------- render
 def render_part(src, start, end, number, cues, out_path, workdir):
+    # the flip happens first, so "Part X" and subtitles still read the right way round
     filters = (
-        "[0:v]split=2[bg][fg];"
+        f"[0:v]{FLIP_FILTERS.get(FLIP, '')}split=2[bg][fg];"
         "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
         "scale=270:480,boxblur=10:2,scale=1080:1920,eq=brightness=-0.08[bgb];"
         "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fgs];"
