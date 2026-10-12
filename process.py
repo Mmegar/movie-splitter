@@ -60,6 +60,7 @@ COCKROACH = os.environ.get("COCKROACH", "on").strip().lower() not in ("off", "no
 COCKROACH_CHANCE = float(os.environ.get("COCKROACH_CHANCE", "0.7"))   # chance a part gets a cockroach run
 COCKROACH_SIZE = int(os.environ.get("COCKROACH_SIZE", "100"))         # length in pixels (screen is 1080 wide)
 LINE = os.environ.get("LINE", "on").strip().lower() not in ("off", "no", "0", "false")
+LINE_WIDTH = int(os.environ.get("LINE_WIDTH", "360"))       # pixels (screen is 1080 wide)
 LINE_THICKNESS = int(os.environ.get("LINE_THICKNESS", "5"))
 ASSETS = Path(__file__).resolve().parent / "assets"
 AUTO_SUBS = os.environ.get("AUTO_SUBTITLES", "on").strip().lower() not in ("off", "no", "0", "false")
@@ -499,14 +500,14 @@ def movie_bottom(src):
 
 
 def line_filter(src, length):
-    """A thin black line right across the movie, near its bottom, that slowly drifts up and down."""
+    """A short thin black line on the movie, near its bottom, that slowly slides left and right."""
     if not LINE:
         return ";[txt0]null[txt]"
-    y0 = min(1860.0, movie_bottom(src) - 50)
-    period = random.uniform(6, 10)
-    y = f"{y0:.0f}+20*sin(2*PI*t/{period:.2f}+{random.uniform(0, 6.28):.2f})"
-    return (f";color=c=black:s=1080x{LINE_THICKNESS}:r=30:d={length:.3f},format=rgba[ln];"
-            f"[txt0][ln]overlay=x=0:y='{y}':eval=frame[txt]")
+    y = min(1860.0, movie_bottom(src) - 40)
+    period = random.uniform(5, 8)
+    x = f"(W-w)/2+(W-w)/2*0.75*sin(2*PI*t/{period:.2f}+{random.uniform(0, 6.28):.2f})"
+    return (f";color=c=black:s={LINE_WIDTH}x{LINE_THICKNESS}:r=30:d={length:.3f},format=rgba[ln];"
+            f"[txt0][ln]overlay=x='{x}':y={y:.0f}:eval=frame[txt]")
 
 
 def cockroach_filter(length):
