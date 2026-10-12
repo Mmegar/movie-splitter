@@ -71,7 +71,7 @@ MAX_RUN_MINUTES = float(os.environ.get("MAX_RUN_MINUTES", "300"))  # don't start
 STARTED = time.time()
 COCKROACH = os.environ.get("COCKROACH", "on").strip().lower() not in ("off", "no", "0", "false")
 COCKROACH_CHANCE = float(os.environ.get("COCKROACH_CHANCE", "1"))   # chance a part gets a cockroach run
-COCKROACH_SIZE = int(os.environ.get("COCKROACH_SIZE", "100"))         # length in pixels (screen is 1080 wide)
+COCKROACH_SIZE = int(os.environ.get("COCKROACH_SIZE", "60"))         # length in pixels (screen is 1080 wide)
 LINE = os.environ.get("LINE", "on").strip().lower() not in ("off", "no", "0", "false")
 LINE_OPACITY = float(os.environ.get("LINE_OPACITY", "0.45"))  # 1 = solid black, 0.2 = very faint
 LINE_THICKNESS = int(os.environ.get("LINE_THICKNESS", "5"))
@@ -695,43 +695,55 @@ def line_filter(src, length):
 
 def cockroach_filter(length, src):
     """
-    Picks a random moment and a random path that crawls across the movie picture itself
-    (in from one side of the screen, out the other).
+    A small cockroach peeks in from the left or right side: it walks a little way onto the
+    edge of the picture, stops for a moment, then turns and scuttles back off the same side.
+    It never crosses the middle of the movie.
     Returns (extra ffmpeg inputs, filter text from [txt] to [v]) or None.
     """
     if not COCKROACH or random.random() > COCKROACH_CHANCE:
         return None
-    W, margin = 1080, COCKROACH_SIZE
+    W, size = 1080, COCKROACH_SIZE
     bottom = movie_bottom(src)
     top = 1920 - bottom
-    pad = min(60.0, (bottom - top) * 0.15)
-    band = (top + pad, bottom - pad)                     # stay on the picture
-    x0, x1 = -margin, W + margin
-    if random.random() < 0.5:
-        x0, x1 = x1, x0
-    y0, y1 = random.uniform(*band), random.uniform(*band)
-    dist = math.hypot(x1 - x0, y1 - y0)
-    secs = dist / random.uniform(170, 260)
-    if length < secs + 2:
+    pad = min(80.0, (bottom - top) * 0.2)
+    lo, hi = top + pad, bottom - pad                       # height range on the picture
+    left = random.random() < 0.5
+    off = -size if left else W + size                       # just off the screen
+    reach = random.uniform(70, 160)                         # how far onto the picture it gets
+    tx = reach if left else W - reach
+    y0 = random.uniform(lo, hi)
+    ty = min(hi, max(lo, y0 + random.uniform(-110, 110)))
+    y1 = min(1900.0, max(20.0, ty + random.uniform(-260, 260)))
+    speed = random.uniform(140, 200)
+    pause = random.uniform(0.3, 0.8)
+    d1 = math.hypot(tx - off, ty - y0) / speed
+    d2 = math.hypot(off - tx, y1 - ty) / speed
+    total = d1 + pause + d2
+    if length < total + 2:
         return None
-    t0 = random.uniform(min(1.0, length * 0.15), length - secs - 0.5)
-    t1 = t0 + secs
-    vx, vy = (x1 - x0) / secs, (y1 - y0) / secs
-    ang = math.atan2(y1 - y0, x1 - x0)
-    px, py = -math.sin(ang) * 8, math.cos(ang) * 8      # little side-to-side wobble
-    wob = f"sin(2*PI*2.2*(t-{t0:.3f}))"
-    x = f"{x0:.1f}+{vx:.2f}*(t-{t0:.3f})+{px:.2f}*{wob}-w/2"
-    y = f"{y0:.1f}+{vy:.2f}*(t-{t0:.3f})+{py:.2f}*{wob}-h/2"
-    when = f"between(t,{t0:.3f},{t1:.3f})"
-    sprite = (f"scale={COCKROACH_SIZE}:-1,format=rgba,"
-              f"rotate={ang:.4f}:c=none:ow=rotw({ang:.4f}):oh=roth({ang:.4f})")
-    filt = (f";[1:v]{sprite}[ra];[2:v]{sprite}[rb];"
-            f"[txt][ra]overlay=x='{x}':y='{y}':eval=frame:enable='{when}*lt(mod(t*16,2),1)'[t1];"
-            f"[t1][rb]overlay=x='{x}':y='{y}':eval=frame:enable='{when}*gte(mod(t*16,2),1)'[v]")
-    inputs = []
-    for name in ("roach_a.png", "roach_b.png"):
-        inputs += ["-loop", "1", "-framerate", "30", "-t", f"{length:.3f}", "-i", str(ASSETS / name)]
-    print(f"  cockroach runs across at {t0:.1f}s-{t1:.1f}s of this part", flush=True)
+    t0 = random.uniform(min(1.0, length * 0.15), length - total - 0.5)
+    # (start, end, from x, from y, to x, to y, moving?)
+    segs = [(t0, t0 + d1, off, y0, tx, ty, True),
+            (t0 + d1, t0 + d1 + pause, tx, ty, tx, ty, False),
+            (t0 + d1 + pause, t0 + total, tx, ty, off, y1, True)]
+    inputs, filt, n, last = [], "", 0, "txt"
+    for k, (a, b, xa, ya, xb, yb, moving) in enumerate(segs):
+        ang = math.atan2((ty - y0) if k < 2 else (y1 - ty), (tx - off) if k < 2 else (off - tx))
+        sprite = (f"scale={size}:-1,format=rgba,"
+                  f"rotate={ang:.4f}:c=none:ow=rotw({ang:.4f}):oh=roth({ang:.4f})")
+        dur = max(b - a, 0.001)
+        x = f"{xa:.1f}+{(xb - xa) / dur:.2f}*(t-{a:.3f})-w/2"
+        y = f"{ya:.1f}+{(yb - ya) / dur:.2f}*(t-{a:.3f})-h/2"
+        frames = [("roach_a.png", "lt(mod(t*16,2),1)"), ("roach_b.png", "gte(mod(t*16,2),1)")] if moving \
+            else [("roach_a.png", "1")]
+        for name, legs in frames:
+            n += 1
+            inputs += ["-loop", "1", "-framerate", "30", "-t", f"{length:.3f}", "-i", str(ASSETS / name)]
+            out = "v" if (k == len(segs) - 1 and name == frames[-1][0]) else f"r{n}"
+            filt += (f";[{n}:v]{sprite}[s{n}];[{last}][s{n}]overlay=x='{x}':y='{y}':eval=frame:"
+                     f"enable='between(t,{a:.3f},{b:.3f})*{legs}'[{out}]")
+            last = out
+    print(f"  cockroach peeks in from the {'left' if left else 'right'} at {t0:.1f}s-{t0 + total:.1f}s", flush=True)
     return inputs, filt
 
 
