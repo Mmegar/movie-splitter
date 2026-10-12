@@ -22,7 +22,9 @@ otherwise made automatically from the clip's own audio with Whisper (speech
 recognition), translated into English if the movie is in another language.
 """
 import json
+import math
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -54,6 +56,10 @@ FLIP_EVERY = float(os.environ.get("FLIP_EVERY", "0"))  # >0: switch on scene cut
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()               # phone notifications (ntfy app)
 MAX_RUN_MINUTES = float(os.environ.get("MAX_RUN_MINUTES", "300"))  # don't start a new movie after this
 STARTED = time.time()
+COCKROACH = os.environ.get("COCKROACH", "on").strip().lower() not in ("off", "no", "0", "false")
+COCKROACH_CHANCE = float(os.environ.get("COCKROACH_CHANCE", "0.7"))   # chance a part gets a cockroach run
+COCKROACH_SIZE = int(os.environ.get("COCKROACH_SIZE", "100"))         # length in pixels (screen is 1080 wide)
+ASSETS = Path(__file__).resolve().parent / "assets"
 AUTO_SUBS = os.environ.get("AUTO_SUBTITLES", "on").strip().lower() not in ("off", "no", "0", "false")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
 FONT = os.environ.get("FONT_FILE", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
@@ -470,6 +476,45 @@ def flip_filter(src, start, end):
     return f"[0:v]split=2[n][m];[m]{f}[mf];[n][mf]overlay=0:0:enable='{when}',"
 
 
+def cockroach_filter(length):
+    """
+    Picks a random moment and a random path across the whole 1080x1920 screen.
+    Returns (extra ffmpeg inputs, filter text from [txt] to [v]) or None.
+    """
+    if not COCKROACH or random.random() > COCKROACH_CHANCE:
+        return None
+    W, H, margin = 1080, 1920, COCKROACH_SIZE
+    def edge_point(edge):
+        return {0: (random.uniform(100, W - 100), -margin), 1: (W + margin, random.uniform(300, H - 300)),
+                2: (random.uniform(100, W - 100), H + margin), 3: (-margin, random.uniform(300, H - 300))}[edge]
+    e = random.randrange(4)
+    x0, y0 = edge_point(e)
+    x1, y1 = edge_point((e + random.choice([1, 2, 2, 3])) % 4)
+    dist = math.hypot(x1 - x0, y1 - y0)
+    secs = dist / random.uniform(300, 450)
+    if length < secs + 2:
+        return None
+    t0 = random.uniform(min(1.0, length * 0.15), length - secs - 0.5)
+    t1 = t0 + secs
+    vx, vy = (x1 - x0) / secs, (y1 - y0) / secs
+    ang = math.atan2(y1 - y0, x1 - x0)
+    px, py = -math.sin(ang) * 8, math.cos(ang) * 8      # little side-to-side wobble
+    wob = f"sin(2*PI*2.2*(t-{t0:.3f}))"
+    x = f"{x0:.1f}+{vx:.2f}*(t-{t0:.3f})+{px:.2f}*{wob}-w/2"
+    y = f"{y0:.1f}+{vy:.2f}*(t-{t0:.3f})+{py:.2f}*{wob}-h/2"
+    when = f"between(t,{t0:.3f},{t1:.3f})"
+    sprite = (f"scale={COCKROACH_SIZE}:-1,format=rgba,"
+              f"rotate={ang:.4f}:c=none:ow=rotw({ang:.4f}):oh=roth({ang:.4f})")
+    filt = (f";[1:v]{sprite}[ra];[2:v]{sprite}[rb];"
+            f"[txt][ra]overlay=x='{x}':y='{y}':eval=frame:enable='{when}*lt(mod(t*16,2),1)'[t1];"
+            f"[t1][rb]overlay=x='{x}':y='{y}':eval=frame:enable='{when}*gte(mod(t*16,2),1)'[v]")
+    inputs = []
+    for name in ("roach_a.png", "roach_b.png"):
+        inputs += ["-loop", "1", "-framerate", "30", "-t", f"{length:.3f}", "-i", str(ASSETS / name)]
+    print(f"  cockroach runs across at {t0:.1f}s-{t1:.1f}s of this part", flush=True)
+    return inputs, filt
+
+
 def render_part(src, start, end, number, cues, out_path, workdir):
     # the flip happens first, so "Part X" and subtitles still read the right way round
     filters = (
@@ -495,11 +540,15 @@ def render_part(src, start, end, number, cues, out_path, workdir):
     filters += (
         f",drawtext=fontfile={FONT}:text='Part {number}':fontsize=96:fontcolor=white:"
         "borderw=7:bordercolor=black:x=(w-text_w)/2:y=230"
-        "[v]"
+        "[txt]"
     )
+    roach = cockroach_filter(end - start)
+    extra_inputs = roach[0] if roach else []
+    filters += roach[1] if roach else ";[txt]null[v]"
     run([
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y",
         "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(src.resolve()),
+        *extra_inputs,
         "-filter_complex", filters, "-map", "[v]", "-map", "0:a:0?",
         "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "160k", "-ac", "2",
