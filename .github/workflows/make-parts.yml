@@ -3,7 +3,7 @@ name: Make TikTok parts
 on:
   schedule:
     - cron: "17 14 * * *"   # once a day, about 3am New Zealand time (GitHub may start it a little late)
-  workflow_dispatch:         # "Run workflow" button to start it by hand
+  workflow_dispatch:         # "Run workflow" button; the Google Drive watcher also starts it this way
 
 concurrency:
   group: make-parts
@@ -21,6 +21,8 @@ jobs:
       PART_SECONDS: "120"       # all mode: length of each part (2 minutes)
       CUT_EARLIEST: "25"        # all mode: may end a part up to 25s early to land on a pause...
       CUT_LATEST: "15"          # ...or up to 15s late
+      # ---- phone notifications: install the "ntfy" app and subscribe to this name ----
+      NTFY_TOPIC: "kimmeng-movies-b6c4562d7a"
       # ---- Google Drive: the "TikTok automation" folder ----
       RCLONE_CONFIG_GDRIVE_TYPE: drive
       RCLONE_CONFIG_GDRIVE_SCOPE: drive
@@ -39,3 +41,10 @@ jobs:
 
       - name: Make parts
         run: python3 process.py
+
+      - name: Tell my phone if something broke
+        if: failure() || cancelled()
+        run: |
+          curl -s -H "Title: Movie run stopped" -H "Tags: warning" \
+            -d "The GitHub run failed or was cancelled. Open the GitHub app > movie-splitter > Actions to see why." \
+            "https://ntfy.sh/$NTFY_TOPIC" || true

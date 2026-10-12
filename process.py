@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -41,6 +42,9 @@ LATEST = float(os.environ.get("CUT_LATEST", "15"))               # ...or this la
 HIGHLIGHT_SECONDS = float(os.environ.get("HIGHLIGHT_SECONDS", "75"))  # "highlights" mode: clip length
 HIGHLIGHT_COUNT = int(os.environ.get("HIGHLIGHT_COUNT", "0"))    # 0 = automatic (about 1 per 10 min)
 MIN_LAST_PART = 30
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()               # phone notifications (ntfy app)
+MAX_RUN_MINUTES = float(os.environ.get("MAX_RUN_MINUTES", "300"))  # don't start a new movie after this
+STARTED = time.time()
 FONT = os.environ.get("FONT_FILE", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
 WORK = Path("work")
 
@@ -57,6 +61,18 @@ JUNK = re.compile(
 def run(cmd, **kw):
     print("+", " ".join(str(c) for c in cmd), flush=True)
     return subprocess.run(cmd, check=True, **kw)
+
+
+def notify(title, message, tags=None):
+    """Sends a phone notification through the ntfy app. Never stops the run if it fails."""
+    if not NTFY_TOPIC:
+        return
+    body = json.dumps({"topic": NTFY_TOPIC, "title": title, "message": message, "tags": tags or []}).encode()
+    try:
+        req = urllib.request.Request("https://ntfy.sh/", data=body, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=15).read()
+    except Exception as e:
+        print(f"(notification not sent: {e})", flush=True)
 
 
 def clean_name(filename):
@@ -359,8 +375,12 @@ def render_part(src, start, end, number, cues, out_path, workdir):
     sub_file.unlink(missing_ok=True)
 
 
-def process_local(src, name, srt, outdir, workdir):
-    """Does all the video work on files already on disk. Returns list of output files."""
+def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None):
+    """
+    Does all the video work on files already on disk. Returns list of output files.
+    on_plan(count, list_file) runs once the parts are chosen; on_part(i, count, file, line)
+    runs right after each part is finished, so it can be uploaded straight away.
+    """
     workdir.mkdir(parents=True, exist_ok=True)
     cues = parse_srt(srt)
     if MODE == "all":
@@ -375,17 +395,26 @@ def process_local(src, name, srt, outdir, workdir):
     print(f"{name}: {total/60:.1f} min -> {len(parts)} parts ({MODE} mode)", flush=True)
     outdir.mkdir(parents=True, exist_ok=True)
     width = max(2, len(str(len(parts))))
-    files, report = [], [f"{name}", f"Mode: {MODE}", ""]
+    lines = []
     for i, (a, b, sc) in enumerate(parts, 1):
-        out = outdir / f"{name} - Part {str(i).zfill(width)}.mp4"
         line = f"Part {i}: {fmt_time(a)} to {fmt_time(b)} ({b - a:.0f}s)"
         if sc is not None:
             line += f"  interest score {sc * 100:.0f}/100"
         print("  " + line, flush=True)
-        report.append(line)
+        lines.append(line)
+    list_file = outdir / "_parts list.txt"
+    list_file.write_text("\n".join([name, f"Mode: {MODE}", ""] + lines) + "\n", encoding="utf-8")
+    if on_plan:
+        on_plan(len(parts), list_file)
+
+    files = []
+    for i, ((a, b, _), line) in enumerate(zip(parts, lines), 1):
+        out = outdir / f"{name} - Part {str(i).zfill(width)}.mp4"
+        print(f"Making part {i} of {len(parts)}...", flush=True)
         render_part(src, a, b, i, cues, out, workdir)
         files.append(out)
-    (outdir / "_parts list.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
+        if on_part:
+            on_part(i, len(parts), out, line)
     return files
 
 
@@ -416,36 +445,45 @@ def resolve_link(url):
     return url, name
 
 
-def fetch_links(files):
-    """Turns .txt link files in 'To edit' into downloaded videos (also in 'To edit')."""
-    for f in [x for x in files if x.lower().endswith(".txt")]:
-        text = subprocess.run(["rclone", "cat", f"{REMOTE}{TO_EDIT}/{f}"], capture_output=True, text=True).stdout
-        urls = re.findall(r"https?://\S+", text)
-        if not urls:
-            continue
-        ok = True
-        for url in urls:
-            try:
-                dl, name = resolve_link(url)
-                local = WORK / "dl" / name
-                local.parent.mkdir(parents=True, exist_ok=True)
-                print(f"Downloading {dl}", flush=True)
-                run(["curl", "-fL", "--retry", "3", "-o", str(local), dl])
-                run(["rclone", "move", str(local.parent), f"{REMOTE}{TO_EDIT}"])
-            except Exception as e:
-                ok = False
-                print(f"FAILED link {url}: {e}", flush=True)
-        rc_move(f, DONE if ok else FAILED)
+def fetch_link_file(f):
+    """Downloads the video(s) in one .txt link file into 'To edit'. Returns their names."""
+    text = subprocess.run(["rclone", "cat", f"{REMOTE}{TO_EDIT}/{f}"], capture_output=True, text=True).stdout
+    urls = re.findall(r"https?://\S+", text)
+    got, ok = [], bool(urls)
+    for url in urls:
+        try:
+            dl, name = resolve_link(url)
+            local = WORK / "dl" / name
+            local.parent.mkdir(parents=True, exist_ok=True)
+            print(f"Downloading {dl}", flush=True)
+            run(["curl", "-fL", "--retry", "3", "-o", str(local), dl])
+            run(["rclone", "move", str(local.parent), f"{REMOTE}{TO_EDIT}"])
+            got.append(name)
+        except Exception as e:
+            ok = False
+            print(f"FAILED link {url}: {e}", flush=True)
+            notify("Link failed", f"Couldn't download {url}\n{e}", ["x"])
+    rc_move(f, DONE if ok else FAILED)
     shutil.rmtree(WORK / "dl", ignore_errors=True)
+    return got
 
 
 # ---------------------------------------------------------------- drive
+def is_video(entry):
+    return Path(entry["Name"]).suffix.lower() in VIDEO_EXT or entry.get("MimeType", "").startswith("video/")
+
+
+def is_link_file(entry):
+    return entry["Name"].lower().endswith(".txt")
+
+
 def list_to_edit():
+    """Files in 'To edit', oldest first (first come, first served)."""
     out = subprocess.run(
-        ["rclone", "lsf", REMOTE + TO_EDIT, "--files-only"],
+        ["rclone", "lsjson", REMOTE + TO_EDIT, "--files-only"],
         capture_output=True, text=True, check=True,
     ).stdout
-    return out.splitlines()
+    return sorted(json.loads(out or "[]"), key=lambda e: e.get("ModTime", ""))
 
 
 def rc_move(src_name, dest_folder):
@@ -460,43 +498,79 @@ def install_tools():
     run(["df", "-h", "/"])
 
 
-def main():
-    files = list_to_edit()
-    if not any(Path(f).suffix.lower() in VIDEO_EXT or f.lower().endswith(".txt") for f in files):
-        print("Nothing in 'To edit'.")
-        return
-    install_tools()
-    fetch_links(files)
-    files = list_to_edit()
-    videos = [f for f in files if Path(f).suffix.lower() in VIDEO_EXT]
-    print(f"Found {len(videos)} video(s).")
+def process_video(video, all_names):
+    stem = Path(video).stem
+    srt_name = next((f for f in all_names if f.lower() == f"{stem.lower()}.srt"), None)
+    name = clean_name(video)
+    dest = f"{REMOTE}{READY}/{name}"
+    print(f"\n=== {video} -> {name} ===", flush=True)
+    notify(f"Started: {name}",
+           "Checking the movie first, then you'll get a message as each part lands in "
+           f"'{READY}/{name}'.", ["clapper"])
+    shutil.rmtree(WORK, ignore_errors=True)
+    (WORK / "in").mkdir(parents=True)
 
-    for video in videos:
-        stem = Path(video).stem
-        srt_name = next((f for f in files if f.lower() == f"{stem.lower()}.srt"), None)
-        name = clean_name(video)
-        print(f"\n=== {video} -> {name} ===", flush=True)
+    def on_plan(count, list_file):
+        run(["rclone", "copyto", str(list_file), f"{dest}/{list_file.name}"])
+        notify(f"{name}: {count} part{'s' if count != 1 else ''} planned", f"Making Part 1 of {count} now.", ["scissors"])
+
+    def on_part(i, count, out, line):
+        run(["rclone", "copyto", str(out), f"{dest}/{out.name}"])
+        out.unlink(missing_ok=True)  # free up disk space straight away
+        notify(f"{name}: Part {i} of {count} ready",
+               f"{line}\nIt's in {READY}/{name}.", ["white_check_mark"] if i == count else ["film_frames"])
+
+    try:
+        run(["rclone", "copy", f"{REMOTE}{TO_EDIT}/{video}", str(WORK / "in"), "--stats-one-line", "--stats", "30s"])
+        srt = None
+        if srt_name:
+            run(["rclone", "copy", f"{REMOTE}{TO_EDIT}/{srt_name}", str(WORK / "in")])
+            srt = WORK / "in" / srt_name
+        files = process_local(WORK / "in" / video, name, srt, WORK / "out", WORK, on_plan, on_part)
+        rc_move(video, DONE)
+        if srt_name:
+            rc_move(srt_name, DONE)
+        print(f"Done: {name}", flush=True)
+        notify(f"✅ Finished: {name}", f"{len(files)} part{'s' if len(files) != 1 else ''} in {READY}/{name}.", ["tada"])
+    except Exception as e:
+        print(f"FAILED: {video}: {e}", flush=True)
+        rc_move(video, FAILED)
+        if srt_name:
+            rc_move(srt_name, FAILED)
+        notify(f"❌ Failed: {name}", f"Moved to the '{FAILED}' folder. Any parts already made are kept.\n{e}", ["x"])
+    finally:
         shutil.rmtree(WORK, ignore_errors=True)
-        (WORK / "in").mkdir(parents=True)
-        try:
-            run(["rclone", "copy", f"{REMOTE}{TO_EDIT}/{video}", str(WORK / "in"), "--stats-one-line", "--stats", "30s"])
-            srt = None
-            if srt_name:
-                run(["rclone", "copy", f"{REMOTE}{TO_EDIT}/{srt_name}", str(WORK / "in")])
-                srt = WORK / "in" / srt_name
-            process_local(WORK / "in" / video, name, srt, WORK / "out", WORK)
-            run(["rclone", "copy", str(WORK / "out"), f"{REMOTE}{READY}/{name}", "--stats-one-line", "--stats", "30s"])
-            rc_move(video, DONE)
-            if srt_name:
-                rc_move(srt_name, DONE)
-            print(f"Done: {name}", flush=True)
-        except Exception as e:
-            print(f"FAILED: {video}: {e}", flush=True)
-            rc_move(video, FAILED)
-            if srt_name:
-                rc_move(srt_name, FAILED)
-        finally:
-            shutil.rmtree(WORK, ignore_errors=True)
+
+
+def main():
+    """
+    Keeps going until 'To edit' is empty, always taking the oldest file next,
+    so movies added while this is running get picked up in the same run.
+    """
+    tools_ready, tried = False, set()
+    while True:
+        entries = [e for e in list_to_edit() if e["Name"] not in tried and (is_video(e) or is_link_file(e))]
+        if not entries:
+            if not tools_ready:
+                print("Nothing in 'To edit'.")
+            return
+        if (time.time() - STARTED) / 60 > MAX_RUN_MINUTES:
+            print("Time limit reached; the rest will be done in the next run.")
+            notify("Paused for now", f"{len(entries)} file(s) still waiting. They'll be done in the next run.")
+            return
+        if not tools_ready:
+            install_tools()
+            tools_ready = True
+
+        nxt = entries[0]
+        tried.add(nxt["Name"])
+        all_names = [e["Name"] for e in list_to_edit()]
+        if is_link_file(nxt):
+            for video in fetch_link_file(nxt["Name"]):  # a link's movie goes next, keeping its place in line
+                tried.add(video)
+                process_video(video, all_names + [video])
+        else:
+            process_video(nxt["Name"], all_names)
 
 
 if __name__ == "__main__":
