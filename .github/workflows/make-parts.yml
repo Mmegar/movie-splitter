@@ -35,7 +35,7 @@ jobs:
         run: curl -fsSL https://rclone.org/install.sh | sudo bash
 
       - name: Check Google Drive connection
-        run: rclone lsd gdrive:
+        run: "rclone lsd gdrive:"
 
       - name: Make parts
         run: python3 process.py
