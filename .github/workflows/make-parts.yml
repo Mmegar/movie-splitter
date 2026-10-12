@@ -12,12 +12,13 @@ concurrency:
 jobs:
   make-parts:
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 355
     env:
       # ---- settings you can change ----
-      # Which folder you drop a movie into picks the mode:
-      #   "To edit" -> MODE below,  "To edit (All)" -> all,  "To edit (Best stretch)" -> best stretch
-      MODE: "highlights"        # mode for the plain "To edit" folder: "highlights", "all" or "stretch"
+      # Every movie is made in each of these, each into its own subfolder of "Ready to post/<movie>":
+      #   highlights = "Highlights" (best moments), stretch = "Best stretch" (best few minutes back to back),
+      #   all = "Whole movie" (everything back to back). Remove one to skip it, e.g. "highlights,stretch"
+      MODES: "highlights,stretch,all"
       STRETCH_MINUTES: "12"     # best stretch mode: how many minutes of the movie to use
       STRETCH_PART_SECONDS: "75" # best stretch mode: length of each part
       HIGHLIGHT_SECONDS: "75"   # highlights mode: length of each clip

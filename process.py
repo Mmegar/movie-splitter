@@ -1,25 +1,25 @@
 """
 TikTok part maker: runs on GitHub Actions (your PC can stay off).
 
-Google Drive layout (inside your "TikTok automation" folder). Which folder you drop a
-movie into decides the mode, and its parts go to the matching "Ready to post" folder:
+Google Drive layout (inside your "TikTok automation" folder):
 
-    To edit/                  -> Ready to post/                  highlights mode
-    To edit (All)/            -> Ready to post (All)/            all mode
-    To edit (Best stretch)/   -> Ready to post (Best stretch)/   best stretch mode
-    Failed/                   <- anything that couldn't be processed
+    To edit/            <- drop videos here (and an optional .srt with the same name),
+                           OR a .txt file containing an archive.org link.
+                           Finished originals are DELETED (to Drive's bin) and listed
+                           in "Finished.txt" in this folder.
+    Ready to post/
+        <Movie name>/
+            Highlights/      <- one subfolder per mode in MODES
+            Best stretch/
+            Whole movie/
+    Failed/             <- anything that couldn't be processed
 
-Drop videos (and an optional .srt with the same name), OR a .txt file containing an
-archive.org link, into a "To edit" folder. Finished originals are DELETED (to Drive's
-bin) and listed in "Finished.txt" in the folder they came from. Missing folders are
-created automatically.
-
-Modes:
+Every movie is made in each mode listed in MODES (default: all three):
   highlights  Scores the whole video for "interesting" moments (loud audio,
               sudden sound spikes, fast scene cuts, lots of movement, busy
               dialogue) and keeps only the best stretches as Part 1, Part 2...
-  all         Cuts the whole video into back-to-back ~PART_SECONDS parts.
-  stretch     Finds the most interesting STRETCH_MINUTES of the movie and cuts just
+  all         "Whole movie": the whole video in back-to-back ~PART_SECONDS parts.
+  stretch     "Best stretch": finds the most interesting STRETCH_MINUTES of the movie and cuts just
               that section into back-to-back ~STRETCH_PART_SECONDS parts.
 
 Either way, every cut lands on a quiet moment (a pause) where possible, each part
@@ -50,16 +50,12 @@ DONE = "Done"
 FAILED = "Failed"
 FINISHED_LOG = "Finished.txt"
 
-MODE = os.environ.get("MODE", "highlights").strip().lower()   # mode for the plain "To edit" folder
+MODE_NAMES = {"highlights": "Highlights", "stretch": "Best stretch", "all": "Whole movie"}
+MODES = [m.strip().lower() for m in os.environ.get("MODES", "highlights,stretch,all").split(",")
+         if m.strip().lower() in MODE_NAMES] or ["highlights"]
+MODE = ""   # the mode being made right now (labels the notifications)
 STRETCH_MINUTES = float(os.environ.get("STRETCH_MINUTES", "12"))           # "stretch" mode: how much of the movie
 STRETCH_PART_SECONDS = float(os.environ.get("STRETCH_PART_SECONDS", "75"))  # "stretch" mode: part length
-MODE_NAMES = {"highlights": "Highlights", "all": "All", "stretch": "Best stretch"}
-# (input folder, output folder, mode). The first one's mode comes from MODE above.
-FOLDERS = [
-    ("To edit", "Ready to post", MODE),
-    ("To edit (All)", "Ready to post (All)", "all"),
-    ("To edit (Best stretch)", "Ready to post (Best stretch)", "stretch"),
-]
 PART_SECONDS = float(os.environ.get("PART_SECONDS", "120"))      # "all" mode: part length
 EARLIEST = float(os.environ.get("CUT_EARLIEST", "25"))           # "all" mode: may cut this early...
 LATEST = float(os.environ.get("CUT_LATEST", "15"))               # ...or this late, to land on a pause
@@ -103,7 +99,8 @@ def notify(title, message, tags=None):
     """Sends a phone notification through the ntfy app. Never stops the run if it fails."""
     if not NTFY_TOPIC:
         return
-    title = f"[{MODE_NAMES.get(MODE, MODE)}] {title}"
+    if MODE:
+        title = f"[{MODE_NAMES.get(MODE, MODE)}] {title}"
     body = json.dumps({"topic": NTFY_TOPIC, "title": title, "message": message, "tags": tags or []}).encode()
     try:
         req = urllib.request.Request("https://ntfy.sh/", data=body, headers={"Content-Type": "application/json"})
@@ -312,39 +309,61 @@ def words_to_lines(words, max_chars=42, max_secs=3.5, max_gap=0.7):
     return cues
 
 
-def auto_subs(src, start, end, workdir):
-    """English subtitle lines for one part, timed from 0 = start of the part. [] if no speech."""
-    wav = workdir / "part.wav"
-    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}",
-         "-i", str(src.resolve()), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)])
-    try:
-        import numpy as np
-        import wave
-        with wave.open(str(wav)) as wf:   # read the audio ourselves (avoids a PyAV version clash)
-            audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
-        model = whisper_model()
-        opts = dict(vad_filter=True, vad_parameters=dict(threshold=0.3, min_speech_duration_ms=150),
+WHISPER_OPTS = dict(vad_filter=True, vad_parameters=dict(threshold=0.3, min_speech_duration_ms=150),
                     word_timestamps=True, condition_on_previous_text=False, beam_size=5)
-        lang = SUB_INFO["lang"]
-        if not lang:
-            segs, info = model.transcribe(audio, **opts)
-            if info.language_probability >= 0.6:
-                lang = SUB_INFO["lang"] = info.language
-                print(f"  spoken language: {lang} ({info.language_probability:.0%} sure)", flush=True)
-        if lang and lang != "en":
-            segs, _ = model.transcribe(audio, language=lang, task="translate", **opts)
-        else:
-            segs, _ = model.transcribe(audio, language="en", **opts)
-        words = [w for seg in segs for w in (seg.words or [])]
-        cues = words_to_lines(words)
-        SUB_INFO["note"] = SUB_INFO["note"] or (
-            f"translated to English from '{lang}'" if lang and lang != "en" else "made automatically (English)")
-        print(f"  subtitles: {len(cues)} lines", flush=True)
-        for a, b, text in cues:
-            print(f"    {fmt_time(start + a)}  {text}", flush=True)
-        return cues
+
+
+def load_wav(src, wav, start=None, length=None):
+    """Extracts 16 kHz mono audio and returns it as numbers Whisper can use."""
+    import numpy as np
+    import wave
+    cut_opts = (["-ss", f"{start:.3f}", "-t", f"{length:.3f}"] if start is not None else [])
+    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *cut_opts, "-i", str(src.resolve()),
+         "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)])
+    try:
+        with wave.open(str(wav)) as wf:   # read the audio ourselves (avoids a PyAV version clash)
+            return np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
     finally:
         wav.unlink(missing_ok=True)
+
+
+def transcribe(audio, offset=0.0):
+    """English subtitle lines for this audio (translated if needed), timed from 0 = start of audio."""
+    model = whisper_model()
+    lang = SUB_INFO["lang"]
+    if not lang:
+        sample = audio[int(len(audio) * 0.2):int(len(audio) * 0.2) + 16000 * 30]   # 30s from 20% in
+        if len(sample) < 16000 * 5:
+            sample = audio
+        _, info = model.transcribe(sample, **WHISPER_OPTS)
+        if info.language_probability >= 0.6:
+            lang = SUB_INFO["lang"] = info.language
+            print(f"  spoken language: {lang} ({info.language_probability:.0%} sure)", flush=True)
+    if lang and lang != "en":
+        segs, _ = model.transcribe(audio, language=lang, task="translate", **WHISPER_OPTS)
+    else:
+        segs, _ = model.transcribe(audio, language="en", **WHISPER_OPTS)
+    words = [w for seg in segs for w in (seg.words or [])]
+    cues = words_to_lines(words)
+    SUB_INFO["note"] = SUB_INFO["note"] or (
+        f"translated to English from '{lang}'" if lang and lang != "en" else "made automatically (English)")
+    print(f"  subtitles: {len(cues)} lines", flush=True)
+    for a, b, text in cues:
+        print(f"    {fmt_time(offset + a)}  {text}", flush=True)
+    return cues
+
+
+def auto_subs(src, start, end, workdir):
+    """Subtitles for one part, timed from 0 = start of the part."""
+    return transcribe(load_wav(src, workdir / "part.wav", start, end - start), offset=start)
+
+
+def auto_subs_full(src, workdir):
+    """Subtitles for the whole movie at once (used when the whole movie is being cut anyway)."""
+    print("Making subtitles for the whole movie...", flush=True)
+    cues = transcribe(load_wav(src, workdir / "full.wav"))
+    SUB_INFO["full"] = True
+    return cues
 
 
 # ---------------------------------------------------------------- analysis
@@ -757,7 +776,7 @@ def render_part(src, start, end, number, cues, out_path, workdir):
     )
     # subtitles: your .srt if there is one, otherwise made from this part's audio
     part_cues = [(a - start, b - start, t) for a, b, t in cues if b > start and a < end]
-    if not cues and AUTO_SUBS:
+    if not cues and AUTO_SUBS and not SUB_INFO.get("full"):
         try:
             part_cues = auto_subs(src, start, end, workdir)
         except Exception as e:
@@ -786,54 +805,65 @@ def render_part(src, start, end, number, cues, out_path, workdir):
         f.unlink(missing_ok=True)
 
 
-def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None):
+def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None, modes=None):
     """
-    Does all the video work on files already on disk. Returns list of output files.
-    on_plan(count, list_file) runs once the parts are chosen; on_part(i, count, file, line)
-    runs right after each part is finished, so it can be uploaded straight away.
+    Does all the video work on files already on disk, once per mode, each mode into its own
+    subfolder of outdir. Returns {mode: [files]}.
+    on_plan(mode, count, list_file) runs once a mode's parts are chosen; on_part(mode, i, count,
+    file, line) runs right after each part is finished, so it can be uploaded straight away.
     """
+    global MODE
+    modes = modes or MODES
     workdir.mkdir(parents=True, exist_ok=True)
-    reset_flip()
     detect_black_bars(src, duration(src))
-    SUB_INFO.update(lang=None, note="from your .srt file" if srt else None)
+    SUB_INFO.update(lang=None, note="from your .srt file" if srt else None, full=False)
     cues = parse_srt(srt)
-    if MODE == "all":
-        total = duration(src)
-        candidates = (quiet_moments(src) if has_audio(src) else []) + subtitle_gaps(cues)
-        parts = choose_cuts(total, candidates)
-    else:
-        total, loud, motion, cuts, quiet = analyse(src, workdir)
-        candidates = quiet + subtitle_gaps(cues)
-        score = interest_scores(loud, motion, cuts, cues)
-        if MODE == "stretch":
+    total, loud, motion, cuts, quiet = analyse(src, workdir)
+    if not cues and AUTO_SUBS and "all" in modes:
+        try:
+            cues = auto_subs_full(src, workdir)
+        except Exception as e:
+            print(f"(no automatic subtitles: {e})", flush=True)
+    candidates = quiet + subtitle_gaps(cues)
+    score = interest_scores(loud, motion, cuts, cues)
+
+    results = {}
+    for mode in modes:
+        MODE = mode
+        reset_flip()
+        if mode == "all":
+            parts = choose_cuts(total, candidates)
+        elif mode == "stretch":
             parts = choose_stretch(total, score, candidates)
         else:
             parts = choose_highlights(total, score, candidates)
-
-    print(f"{name}: {total/60:.1f} min -> {len(parts)} parts ({MODE} mode)", flush=True)
-    outdir.mkdir(parents=True, exist_ok=True)
-    width = max(2, len(str(len(parts))))
-    lines = []
-    for i, (a, b, sc) in enumerate(parts, 1):
-        line = f"Part {i}: {fmt_time(a)} to {fmt_time(b)} ({b - a:.0f}s)"
-        if sc is not None:
-            line += f"  interest score {sc * 100:.0f}/100"
-        print("  " + line, flush=True)
-        lines.append(line)
-    list_file = outdir / "_parts list.txt"
-    list_file.write_text("\n".join([name, f"Mode: {MODE_NAMES.get(MODE, MODE)}", ""] + lines) + "\n", encoding="utf-8")
-    if on_plan:
-        on_plan(len(parts), list_file)
-
-    files = []
-    for i, ((a, b, _), line) in enumerate(zip(parts, lines), 1):
-        out = outdir / f"{name} - Part {str(i).zfill(width)}.mp4"
-        print(f"Making part {i} of {len(parts)}...", flush=True)
-        render_part(src, a, b, i, cues, out, workdir)
-        files.append(out)
-        if on_part:
-            on_part(i, len(parts), out, line)
-    return files
+        label = MODE_NAMES[mode]
+        print(f"\n{name}: {total/60:.1f} min -> {len(parts)} parts ({label})", flush=True)
+        mdir = outdir / label
+        mdir.mkdir(parents=True, exist_ok=True)
+        width = max(2, len(str(len(parts))))
+        lines = []
+        for i, (a, b, sc) in enumerate(parts, 1):
+            line = f"Part {i}: {fmt_time(a)} to {fmt_time(b)} ({b - a:.0f}s)"
+            if sc is not None:
+                line += f"  interest score {sc * 100:.0f}/100"
+            print("  " + line, flush=True)
+            lines.append(line)
+        list_file = mdir / "_parts list.txt"
+        list_file.write_text("\n".join([name, f"Mode: {label}", ""] + lines) + "\n", encoding="utf-8")
+        if on_plan:
+            on_plan(mode, len(parts), list_file)
+        files = []
+        for i, ((a, b, _), line) in enumerate(zip(parts, lines), 1):
+            out = mdir / f"{name} - Part {str(i).zfill(width)}.mp4"
+            print(f"Making {label} part {i} of {len(parts)}...", flush=True)
+            render_part(src, a, b, i, cues, out, workdir)
+            files.append(out)
+            if on_part:
+                on_part(mode, i, len(parts), out, line)
+        results[mode] = files
+    MODE = ""
+    return results
 
 
 # ---------------------------------------------------------------- links (archive.org)
@@ -898,36 +928,13 @@ def is_link_file(entry):
     return entry["Name"].lower().endswith(".txt") and entry["Name"] != FINISHED_LOG
 
 
-def use_folder(folder):
-    """Switches the input/output folders and mode for the next file."""
-    global TO_EDIT, READY, MODE
-    TO_EDIT, READY, MODE = folder
-
-
 def list_to_edit():
-    """Files in the current 'To edit' folder, oldest first (first come, first served)."""
+    """Files in 'To edit', oldest first (first come, first served)."""
     out = subprocess.run(
         ["rclone", "lsjson", REMOTE + TO_EDIT, "--files-only"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=True,
     ).stdout
     return sorted(json.loads(out or "[]"), key=lambda e: e.get("ModTime", ""))
-
-
-def waiting_everywhere(tried):
-    """Every waiting file in every 'To edit' folder, oldest first: [(folder, entry)]."""
-    found = []
-    for folder in FOLDERS:
-        use_folder(folder)
-        for e in list_to_edit():
-            if (folder[0], e["Name"]) not in tried and (is_video(e) or is_link_file(e)):
-                found.append((folder, e))
-    return sorted(found, key=lambda fe: fe[1].get("ModTime", ""))
-
-
-def make_folders():
-    for to_edit, ready, _ in FOLDERS:
-        subprocess.run(["rclone", "mkdir", REMOTE + to_edit])
-        subprocess.run(["rclone", "mkdir", REMOTE + ready])
 
 
 def rc_move(src_name, dest_folder):
@@ -964,27 +971,28 @@ def process_video(video, all_names):
     srt_name = next((f for f in all_names if f.lower() == f"{stem.lower()}.srt"), None)
     name = clean_name(video)
     dest = f"{REMOTE}{READY}/{name}"
+    labels = ", ".join(MODE_NAMES[m] for m in MODES)
     print(f"\n=== {video} -> {name} ===", flush=True)
     notify(f"Started: {name}",
-           "Checking the movie first, then you'll get a message as each part lands in "
+           f"Making: {labels}.\nChecking the movie first, then you'll get a message as each part lands in "
            f"'{READY}/{name}'.", ["clapper"])
     shutil.rmtree(WORK, ignore_errors=True)
     (WORK / "in").mkdir(parents=True)
+    captions = {}
 
-    def on_plan(count, list_file):
-        run(["rclone", "copyto", str(list_file), f"{dest}/{list_file.name}"])
+    def on_plan(mode, count, list_file):
+        run(["rclone", "copyto", str(list_file), f"{dest}/{MODE_NAMES[mode]}/{list_file.name}"])
         notify(f"{name}: {count} part{'s' if count != 1 else ''} planned", f"Making Part 1 of {count} now.", ["scissors"])
 
-    captions = []
-
-    def on_part(i, count, out, line):
-        run(["rclone", "copyto", str(out), f"{dest}/{out.name}"])
+    def on_part(mode, i, count, out, line):
+        folder = f"{READY}/{name}/{MODE_NAMES[mode]}"
+        run(["rclone", "copyto", str(out), f"{REMOTE}{folder}/{out.name}"])
         out.unlink(missing_ok=True)  # free up disk space straight away
-        if CAPTIONS_ON and not captions:
-            captions.extend(make_captions(count))
-        caption = f"\n\n📝 Caption:\n{captions[i - 1]}" if captions else ""
+        if CAPTIONS_ON and mode not in captions:
+            captions[mode] = make_captions(count)
+        caption = f"\n\n📝 Caption:\n{captions[mode][i - 1]}" if mode in captions else ""
         notify(f"{name}: Part {i} of {count} ready",
-               f"{line}\nIt's in {READY}/{name}.{caption}", ["white_check_mark"] if i == count else ["film_frames"])
+               f"{line}\nIt's in {folder}.{caption}", ["white_check_mark"] if i == count else ["film_frames"])
 
     try:
         run(["rclone", "copy", f"{REMOTE}{TO_EDIT}/{video}", str(WORK / "in"), "--stats-one-line", "--stats", "30s"])
@@ -992,20 +1000,22 @@ def process_video(video, all_names):
         if srt_name:
             run(["rclone", "copy", f"{REMOTE}{TO_EDIT}/{srt_name}", str(WORK / "in")])
             srt = WORK / "in" / srt_name
-        files = process_local(WORK / "in" / video, name, srt, WORK / "out", WORK, on_plan, on_part)
+        results = process_local(WORK / "in" / video, name, srt, WORK / "out", WORK, on_plan, on_part)
         rc_delete(video)
         if srt_name:
             rc_delete(srt_name)
+        summary = ", ".join(f"{MODE_NAMES[m]}: {len(f)} part{'s' if len(f) != 1 else ''}" for m, f in results.items())
         when = datetime.now(ZoneInfo("Pacific/Auckland")).strftime("%d %b %Y, %I:%M %p")
-        log_finished(f"{when}  -  {name}  -  {len(files)} part{'s' if len(files) != 1 else ''} in "
-                     f"'{READY}/{name}'  -  subtitles: {SUB_INFO['note'] or 'none (no speech found)'}  "
-                     f"(original file: {video})")
+        log_finished(f"{when}  -  {name}  -  {summary}  -  in '{READY}/{name}'  -  "
+                     f"subtitles: {SUB_INFO['note'] or 'none (no speech found)'}  (original file: {video})")
         print(f"Done: {name}", flush=True)
         notify(f"✅ Finished: {name}",
-               f"{len(files)} part{'s' if len(files) != 1 else ''} in {READY}/{name}.\n"
+               f"{summary}.\nAll in {READY}/{name}.\n"
                f"🗑️ The big movie file ({video}) was deleted to free up space. "
                f"It's in Google Drive's bin for 30 days, and listed in {TO_EDIT}/{FINISHED_LOG}.", ["tada"])
     except Exception as e:
+        global MODE
+        MODE = ""
         print(f"FAILED: {video}: {e}", flush=True)
         rc_move(video, FAILED)
         if srt_name:
@@ -1017,16 +1027,15 @@ def process_video(video, all_names):
 
 def main():
     """
-    Keeps going until every 'To edit' folder is empty, always taking the oldest file next,
+    Keeps going until 'To edit' is empty, always taking the oldest file next,
     so movies added while this is running get picked up in the same run.
     """
-    make_folders()
     tools_ready, tried = False, set()
     while True:
-        entries = waiting_everywhere(tried)
+        entries = [e for e in list_to_edit() if e["Name"] not in tried and (is_video(e) or is_link_file(e))]
         if not entries:
             if not tools_ready:
-                print("Nothing in any 'To edit' folder.")
+                print("Nothing in 'To edit'.")
             return
         if (time.time() - STARTED) / 60 > MAX_RUN_MINUTES:
             print("Time limit reached; the rest will be done in the next run.")
@@ -1036,13 +1045,12 @@ def main():
             install_tools()
             tools_ready = True
 
-        folder, nxt = entries[0]
-        use_folder(folder)
-        tried.add((folder[0], nxt["Name"]))
+        nxt = entries[0]
+        tried.add(nxt["Name"])
         all_names = [e["Name"] for e in list_to_edit()]
         if is_link_file(nxt):
             for video in fetch_link_file(nxt["Name"]):  # a link's movie goes next, keeping its place in line
-                tried.add((folder[0], video))
+                tried.add(video)
                 process_video(video, all_names + [video])
         else:
             process_video(nxt["Name"], all_names)

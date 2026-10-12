@@ -2,8 +2,7 @@
  * Google Drive watcher for movie-splitter.
  *
  * Runs inside your Google account (script.google.com), for free, every 5 minutes.
- * If there's a movie (or an archive.org .txt link) in any "To edit" folder
- * ("To edit", "To edit (All)", "To edit (Best stretch)") and GitHub isn't
+ * If there's a movie (or an archive.org .txt link) in "To edit" and GitHub isn't
  * already busy, it starts the "Make TikTok parts" run. Your PC can stay off.
  * It also sends a phone notification (ntfy) the first time it sees each new file.
  *
@@ -18,12 +17,8 @@ const OWNER = 'Mmegar';
 const REPO = 'movie-splitter';
 const WORKFLOW = 'make-parts.yml';
 const TO_EDIT_FOLDER_ID = '1Mf-bBD8AZofLMk31EQzMlVVlbcDQN5_-';
-// Other "To edit" folders next to it (same parent folder), and the mode each one uses.
-const FOLDERS = [
-  { name: 'To edit', mode: 'Highlights' },
-  { name: 'To edit (All)', mode: 'All' },
-  { name: 'To edit (Best stretch)', mode: 'Best stretch' },
-];
+// Extra "To edit" folders next to it (same parent folder) can be added here if ever needed.
+const FOLDERS = [{ name: 'To edit', mode: '' }];
 const VIDEO_EXT = /\.(mkv|mp4|avi|mov|m4v|wmv|webm|mpg|mpeg|ts|ogv|txt)$/i;
 const IGNORE = ['Finished.txt'];                // the splitter's own list of finished movies
 const NTFY_TOPIC = 'kimmeng-movies-b6c4562d7a';  // same as in the GitHub workflow
@@ -91,7 +86,7 @@ function rememberNew(waiting) {
 
 function tellPhone(files, status) {
   if (!files.length || !NTFY_TOPIC) return;
-  const names = files.map(f => `• ${f.name}  (${f.mode} mode)`).join('\n');
+  const names = files.map(f => '• ' + f.name + (f.mode ? `  (${f.mode})` : '')).join('\n');
   const title = files.length === 1 ? '📥 New file found in "To edit"' : `📥 ${files.length} new files found in "To edit"`;
   try {
     UrlFetchApp.fetch('https://ntfy.sh/', {
