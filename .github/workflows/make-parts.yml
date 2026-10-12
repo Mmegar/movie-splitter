@@ -22,6 +22,8 @@ jobs:
       CUT_EARLIEST: "25"        # all mode: may end a part up to 25s early to land on a pause...
       CUT_LATEST: "15"          # ...or up to 15s late
       FLIP: "mirror"            # "none", "mirror" (left-right), "upsidedown", or "both"
+      AUTO_SUBTITLES: "on"      # "on" = make English subtitles from the audio when there's no .srt, "off" = don't
+      WHISPER_MODEL: "small"    # speech model: "base" (faster), "small" (good), "medium" (best but slow)
       FLIP_EVERY: "150"         # switch normal/flipped on a scene cut, at most once every 150s (2.5 min); "-1" = on every cut; "0" = flipped all the time
       # ---- phone notifications: install the "ntfy" app and subscribe to this name ----
       NTFY_TOPIC: "kimmeng-movies-b6c4562d7a"
@@ -34,6 +36,19 @@ jobs:
       RCLONE_CONFIG_GDRIVE_TOKEN: '{"access_token":"","token_type":"Bearer","refresh_token":"${{ secrets.GDRIVE_REFRESH_TOKEN }}","expiry":"2000-01-01T00:00:00Z"}'
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Keep the speech model between runs
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: whisper-${{ env.WHISPER_MODEL }}
+
+      - name: Install the subtitle maker (Whisper)
+        run: pip install faster-whisper
 
       - name: Install rclone
         run: curl -fsSL https://rclone.org/install.sh | sudo bash

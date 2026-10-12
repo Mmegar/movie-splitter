@@ -3,9 +3,10 @@ TikTok part maker: runs on GitHub Actions (your PC can stay off).
 
 Google Drive layout (inside your "TikTok automation" folder):
     To edit/        <- drop videos here (and an optional .srt with the same name),
-                       OR a .txt file containing an archive.org link
+                       OR a .txt file containing an archive.org link.
+                       Finished originals are DELETED (to Drive's bin) and listed in
+                       "Finished.txt" in this folder.
     Ready to post/  <- finished parts appear here, one subfolder per video
-    Done/           <- originals are moved here after processing
     Failed/         <- anything that couldn't be processed
 
 Two modes (set MODE in the workflow file):
@@ -16,7 +17,9 @@ Two modes (set MODE in the workflow file):
 
 Either way, every cut lands on a quiet moment (a pause) where possible, each part
 is made vertical 9:16 (1080x1920) with a blurred background, gets "Part X" at the
-top, and gets burned-in subtitles if a matching .srt exists.
+top, and gets burned-in English subtitles: from a matching .srt if you added one,
+otherwise made automatically from the clip's own audio with Whisper (speech
+recognition), translated into English if the movie is in another language.
 """
 import json
 import os
@@ -27,13 +30,16 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 REMOTE = "gdrive:"
 TO_EDIT = "To edit"
 READY = "Ready to post"
 DONE = "Done"
 FAILED = "Failed"
+FINISHED_LOG = "Finished.txt"
 
 MODE = os.environ.get("MODE", "highlights").strip().lower()
 PART_SECONDS = float(os.environ.get("PART_SECONDS", "120"))      # "all" mode: part length
@@ -48,6 +54,8 @@ FLIP_EVERY = float(os.environ.get("FLIP_EVERY", "0"))  # >0: switch on scene cut
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()               # phone notifications (ntfy app)
 MAX_RUN_MINUTES = float(os.environ.get("MAX_RUN_MINUTES", "300"))  # don't start a new movie after this
 STARTED = time.time()
+AUTO_SUBS = os.environ.get("AUTO_SUBTITLES", "on").strip().lower() not in ("off", "no", "0", "false")
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
 FONT = os.environ.get("FONT_FILE", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
 WORK = Path("work")
 
@@ -164,6 +172,68 @@ def write_part_srt(cues, start, end, out_path):
         return False
     Path(out_path).write_text("\n".join(out), encoding="utf-8")
     return True
+
+
+# ---------------------------------------------------------------- automatic subtitles (Whisper)
+_WHISPER = None
+SUB_INFO = {"lang": None, "note": None}   # per movie: spoken language, and what kind of subs were used
+
+
+def whisper_model():
+    global _WHISPER
+    if _WHISPER is None:
+        from faster_whisper import WhisperModel
+        print(f"Loading the Whisper '{WHISPER_MODEL}' speech model...", flush=True)
+        _WHISPER = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+    return _WHISPER
+
+
+def words_to_lines(words, max_chars=42, max_secs=3.5, max_gap=0.7):
+    """Groups Whisper's timed words into short, readable subtitle lines."""
+    cues, cur = [], []
+    def flush():
+        if cur:
+            text = "".join(w.word for w in cur).strip()
+            if text:
+                cues.append((cur[0].start, max(cur[-1].end, cur[0].start + 0.6), text))
+            cur.clear()
+    for w in words:
+        if cur and (len("".join(x.word for x in cur) + w.word) > max_chars
+                    or w.end - cur[0].start > max_secs or w.start - cur[-1].end > max_gap):
+            flush()
+        cur.append(w)
+        if w.word.strip()[-1:] in ".?!":
+            flush()
+    flush()
+    return cues
+
+
+def auto_subs(src, start, end, workdir):
+    """English subtitle lines for one part, timed from 0 = start of the part. [] if no speech."""
+    wav = workdir / "part.wav"
+    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}",
+         "-i", str(src.resolve()), "-vn", "-ac", "1", "-ar", "16000", str(wav)])
+    try:
+        model = whisper_model()
+        opts = dict(vad_filter=True, word_timestamps=True, condition_on_previous_text=False, beam_size=5)
+        lang = SUB_INFO["lang"]
+        if not lang:
+            segs, info = model.transcribe(str(wav), **opts)
+            if info.language_probability >= 0.6:
+                lang = SUB_INFO["lang"] = info.language
+                print(f"  spoken language: {lang} ({info.language_probability:.0%} sure)", flush=True)
+        if lang and lang != "en":
+            segs, _ = model.transcribe(str(wav), language=lang, task="translate", **opts)
+        else:
+            segs, _ = model.transcribe(str(wav), language="en", **opts)
+        words = [w for seg in segs for w in (seg.words or [])]
+        cues = words_to_lines(words)
+        SUB_INFO["note"] = SUB_INFO["note"] or (
+            f"translated to English from '{lang}'" if lang and lang != "en" else "made automatically (English)")
+        print(f"  subtitles: {len(cues)} lines" + (f', e.g. "{cues[0][2]}"' if cues else ""), flush=True)
+        return cues
+    finally:
+        wav.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------- analysis
@@ -404,7 +474,13 @@ def render_part(src, start, end, number, cues, out_path, workdir):
         "[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1"
     )
     sub_file = workdir / "part.srt"
-    if cues and write_part_srt(cues, start, end, sub_file):
+    has_subs = bool(cues) and write_part_srt(cues, start, end, sub_file)
+    if not cues and AUTO_SUBS:
+        try:
+            has_subs = write_part_srt(auto_subs(src, start, end, workdir), 0, end - start, sub_file)
+        except Exception as e:
+            print(f"  (no automatic subtitles for this part: {e})", flush=True)
+    if has_subs:
         filters += (
             ",subtitles=part.srt:original_size=1080x1920:force_style="
             "'FontName=DejaVu Sans,Bold=1,Fontsize=12,PrimaryColour=&H00FFFFFF,"
@@ -435,6 +511,7 @@ def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None):
     """
     workdir.mkdir(parents=True, exist_ok=True)
     reset_flip()
+    SUB_INFO.update(lang=None, note="from your .srt file" if srt else None)
     cues = parse_srt(srt)
     if MODE == "all":
         total = duration(src)
@@ -516,7 +593,10 @@ def fetch_link_file(f):
             ok = False
             print(f"FAILED link {url}: {e}", flush=True)
             notify("Link failed", f"Couldn't download {url}\n{e}", ["x"])
-    rc_move(f, DONE if ok else FAILED)
+    if ok:
+        rc_delete(f)
+    else:
+        rc_move(f, FAILED)
     shutil.rmtree(WORK / "dl", ignore_errors=True)
     return got
 
@@ -527,7 +607,7 @@ def is_video(entry):
 
 
 def is_link_file(entry):
-    return entry["Name"].lower().endswith(".txt")
+    return entry["Name"].lower().endswith(".txt") and entry["Name"] != FINISHED_LOG
 
 
 def list_to_edit():
@@ -541,6 +621,23 @@ def list_to_edit():
 
 def rc_move(src_name, dest_folder):
     subprocess.run(["rclone", "moveto", f"{REMOTE}{TO_EDIT}/{src_name}", f"{REMOTE}{dest_folder}/{src_name}"])
+
+
+def rc_delete(name):
+    """Deletes a file from 'To edit'. It goes to Google Drive's bin, so it can be restored for 30 days."""
+    subprocess.run(["rclone", "deletefile", "--drive-use-trash=true", f"{REMOTE}{TO_EDIT}/{name}"])
+
+
+def log_finished(line):
+    """Adds a line to 'To edit/Finished.txt' (creates it the first time)."""
+    remote = f"{REMOTE}{TO_EDIT}/{FINISHED_LOG}"
+    old = subprocess.run(["rclone", "cat", remote], capture_output=True, text=True).stdout
+    if not old.strip():
+        old = "Finished movies. The original files were deleted (they're in Google Drive's bin for 30 days).\n\n"
+    local = Path("finished_log.txt")
+    local.write_text(old.rstrip("\n") + "\n" + line + "\n", encoding="utf-8")
+    subprocess.run(["rclone", "copyto", str(local), remote])
+    local.unlink(missing_ok=True)
 
 
 def install_tools():
@@ -580,9 +677,13 @@ def process_video(video, all_names):
             run(["rclone", "copy", f"{REMOTE}{TO_EDIT}/{srt_name}", str(WORK / "in")])
             srt = WORK / "in" / srt_name
         files = process_local(WORK / "in" / video, name, srt, WORK / "out", WORK, on_plan, on_part)
-        rc_move(video, DONE)
+        rc_delete(video)
         if srt_name:
-            rc_move(srt_name, DONE)
+            rc_delete(srt_name)
+        when = datetime.now(ZoneInfo("Pacific/Auckland")).strftime("%d %b %Y, %I:%M %p")
+        log_finished(f"{when}  -  {name}  -  {len(files)} part{'s' if len(files) != 1 else ''} in "
+                     f"'{READY}/{name}'  -  subtitles: {SUB_INFO['note'] or 'none (no speech found)'}  "
+                     f"(original file: {video})")
         print(f"Done: {name}", flush=True)
         notify(f"✅ Finished: {name}", f"{len(files)} part{'s' if len(files) != 1 else ''} in {READY}/{name}.", ["tada"])
     except Exception as e:
