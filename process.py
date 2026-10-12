@@ -500,10 +500,10 @@ def movie_bottom(src):
 
 
 def line_filter(src, length):
-    """A thin black line just under the movie that slowly slides left and right."""
+    """A thin black line on top of the movie, near its bottom edge, that slowly slides left and right."""
     if not LINE:
         return ";[txt0]null[txt]"
-    y = min(1900.0, movie_bottom(src) + 14)
+    y = min(1880.0, movie_bottom(src) - 40)
     period = random.uniform(5, 8)
     x = f"(W-w)/2+(W-w)/2*0.75*sin(2*PI*t/{period:.2f}+{random.uniform(0, 6.28):.2f})"
     return (f";color=c=black:s={LINE_WIDTH}x{LINE_THICKNESS}:r=30:d={length:.3f}[ln];"
