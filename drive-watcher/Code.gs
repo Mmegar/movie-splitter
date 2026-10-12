@@ -2,7 +2,8 @@
  * Google Drive watcher for movie-splitter.
  *
  * Runs inside your Google account (script.google.com), for free, every 5 minutes.
- * If there's a movie (or an archive.org .txt link) in "To edit" and GitHub isn't
+ * If there's a movie (or an archive.org .txt link) in any "To edit" folder
+ * ("To edit", "To edit (All)", "To edit (Best stretch)") and GitHub isn't
  * already busy, it starts the "Make TikTok parts" run. Your PC can stay off.
  * It also sends a phone notification (ntfy) the first time it sees each new file.
  *
@@ -17,6 +18,12 @@ const OWNER = 'Mmegar';
 const REPO = 'movie-splitter';
 const WORKFLOW = 'make-parts.yml';
 const TO_EDIT_FOLDER_ID = '1Mf-bBD8AZofLMk31EQzMlVVlbcDQN5_-';
+// Other "To edit" folders next to it (same parent folder), and the mode each one uses.
+const FOLDERS = [
+  { name: 'To edit', mode: 'Highlights' },
+  { name: 'To edit (All)', mode: 'All' },
+  { name: 'To edit (Best stretch)', mode: 'Best stretch' },
+];
 const VIDEO_EXT = /\.(mkv|mp4|avi|mov|m4v|wmv|webm|mpg|mpeg|ts|ogv|txt)$/i;
 const IGNORE = ['Finished.txt'];                // the splitter's own list of finished movies
 const NTFY_TOPIC = 'kimmeng-movies-b6c4562d7a';  // same as in the GitHub workflow
@@ -45,16 +52,31 @@ function checkForNewVideos() {
   tellPhone(newFiles, 'Starting now. You\'ll get a "Started" message once GitHub begins (usually within a minute or two).');
 }
 
+function watchedFolders() {
+  const main = DriveApp.getFolderById(TO_EDIT_FOLDER_ID);
+  const out = [{ folder: main, mode: FOLDERS[0].mode }];
+  const parents = main.getParents();
+  if (!parents.hasNext()) return out;
+  const parent = parents.next();
+  FOLDERS.slice(1).forEach(spec => {
+    const it = parent.getFoldersByName(spec.name);
+    if (it.hasNext()) out.push({ folder: it.next(), mode: spec.mode });
+  });
+  return out;
+}
+
 function waitingFiles() {
   const out = [];
-  const files = DriveApp.getFolderById(TO_EDIT_FOLDER_ID).getFiles();
-  while (files.hasNext()) {
-    const f = files.next();
-    if (IGNORE.indexOf(f.getName()) !== -1) continue;
-    if (VIDEO_EXT.test(f.getName()) || f.getMimeType().indexOf('video/') === 0) {
-      out.push({ id: f.getId(), name: f.getName() });
+  watchedFolders().forEach(w => {
+    const files = w.folder.getFiles();
+    while (files.hasNext()) {
+      const f = files.next();
+      if (IGNORE.indexOf(f.getName()) !== -1) continue;
+      if (VIDEO_EXT.test(f.getName()) || f.getMimeType().indexOf('video/') === 0) {
+        out.push({ id: f.getId(), name: f.getName(), mode: w.mode });
+      }
     }
-  }
+  });
   return out;
 }
 
@@ -69,7 +91,7 @@ function rememberNew(waiting) {
 
 function tellPhone(files, status) {
   if (!files.length || !NTFY_TOPIC) return;
-  const names = files.map(f => '• ' + f.name).join('\n');
+  const names = files.map(f => `• ${f.name}  (${f.mode} mode)`).join('\n');
   const title = files.length === 1 ? '📥 New file found in "To edit"' : `📥 ${files.length} new files found in "To edit"`;
   try {
     UrlFetchApp.fetch('https://ntfy.sh/', {

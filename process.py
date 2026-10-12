@@ -1,19 +1,26 @@
 """
 TikTok part maker: runs on GitHub Actions (your PC can stay off).
 
-Google Drive layout (inside your "TikTok automation" folder):
-    To edit/        <- drop videos here (and an optional .srt with the same name),
-                       OR a .txt file containing an archive.org link.
-                       Finished originals are DELETED (to Drive's bin) and listed in
-                       "Finished.txt" in this folder.
-    Ready to post/  <- finished parts appear here, one subfolder per video
-    Failed/         <- anything that couldn't be processed
+Google Drive layout (inside your "TikTok automation" folder). Which folder you drop a
+movie into decides the mode, and its parts go to the matching "Ready to post" folder:
 
-Two modes (set MODE in the workflow file):
+    To edit/                  -> Ready to post/                  highlights mode
+    To edit (All)/            -> Ready to post (All)/            all mode
+    To edit (Best stretch)/   -> Ready to post (Best stretch)/   best stretch mode
+    Failed/                   <- anything that couldn't be processed
+
+Drop videos (and an optional .srt with the same name), OR a .txt file containing an
+archive.org link, into a "To edit" folder. Finished originals are DELETED (to Drive's
+bin) and listed in "Finished.txt" in the folder they came from. Missing folders are
+created automatically.
+
+Modes:
   highlights  Scores the whole video for "interesting" moments (loud audio,
               sudden sound spikes, fast scene cuts, lots of movement, busy
               dialogue) and keeps only the best stretches as Part 1, Part 2...
-  all         Cuts the whole video into ~PART_SECONDS parts.
+  all         Cuts the whole video into back-to-back ~PART_SECONDS parts.
+  stretch     Finds the most interesting STRETCH_MINUTES of the movie and cuts just
+              that section into back-to-back ~STRETCH_PART_SECONDS parts.
 
 Either way, every cut lands on a quiet moment (a pause) where possible, each part
 is made vertical 9:16 (1080x1920) with a blurred background, gets "Part X" at the
@@ -43,7 +50,16 @@ DONE = "Done"
 FAILED = "Failed"
 FINISHED_LOG = "Finished.txt"
 
-MODE = os.environ.get("MODE", "highlights").strip().lower()
+MODE = os.environ.get("MODE", "highlights").strip().lower()   # mode for the plain "To edit" folder
+STRETCH_MINUTES = float(os.environ.get("STRETCH_MINUTES", "12"))           # "stretch" mode: how much of the movie
+STRETCH_PART_SECONDS = float(os.environ.get("STRETCH_PART_SECONDS", "75"))  # "stretch" mode: part length
+MODE_NAMES = {"highlights": "Highlights", "all": "All", "stretch": "Best stretch"}
+# (input folder, output folder, mode). The first one's mode comes from MODE above.
+FOLDERS = [
+    ("To edit", "Ready to post", MODE),
+    ("To edit (All)", "Ready to post (All)", "all"),
+    ("To edit (Best stretch)", "Ready to post (Best stretch)", "stretch"),
+]
 PART_SECONDS = float(os.environ.get("PART_SECONDS", "120"))      # "all" mode: part length
 EARLIEST = float(os.environ.get("CUT_EARLIEST", "25"))           # "all" mode: may cut this early...
 LATEST = float(os.environ.get("CUT_LATEST", "15"))               # ...or this late, to land on a pause
@@ -57,7 +73,7 @@ NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()               # phone noti
 MAX_RUN_MINUTES = float(os.environ.get("MAX_RUN_MINUTES", "300"))  # don't start a new movie after this
 STARTED = time.time()
 COCKROACH = os.environ.get("COCKROACH", "on").strip().lower() not in ("off", "no", "0", "false")
-COCKROACH_CHANCE = float(os.environ.get("COCKROACH_CHANCE", "0.7"))   # chance a part gets a cockroach run
+COCKROACH_CHANCE = float(os.environ.get("COCKROACH_CHANCE", "1"))   # chance a part gets a cockroach run
 COCKROACH_SIZE = int(os.environ.get("COCKROACH_SIZE", "100"))         # length in pixels (screen is 1080 wide)
 LINE = os.environ.get("LINE", "on").strip().lower() not in ("off", "no", "0", "false")
 LINE_WIDTH = int(os.environ.get("LINE_WIDTH", "360"))       # pixels (screen is 1080 wide)
@@ -87,6 +103,7 @@ def notify(title, message, tags=None):
     """Sends a phone notification through the ntfy app. Never stops the run if it fails."""
     if not NTFY_TOPIC:
         return
+    title = f"[{MODE_NAMES.get(MODE, MODE)}] {title}"
     body = json.dumps({"topic": NTFY_TOPIC, "title": title, "message": message, "tags": tags or []}).encode()
     try:
         req = urllib.request.Request("https://ntfy.sh/", data=body, headers={"Content-Type": "application/json"})
@@ -306,7 +323,8 @@ def auto_subs(src, start, end, workdir):
         with wave.open(str(wav)) as wf:   # read the audio ourselves (avoids a PyAV version clash)
             audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
         model = whisper_model()
-        opts = dict(vad_filter=True, word_timestamps=True, condition_on_previous_text=False, beam_size=5)
+        opts = dict(vad_filter=True, vad_parameters=dict(threshold=0.3, min_speech_duration_ms=150),
+                    word_timestamps=True, condition_on_previous_text=False, beam_size=5)
         lang = SUB_INFO["lang"]
         if not lang:
             segs, info = model.transcribe(audio, **opts)
@@ -492,20 +510,42 @@ def choose_highlights(total, score, candidates):
     return clips
 
 
-def choose_cuts(total, candidates):
-    """'all' mode: back-to-back parts of ~PART_SECONDS. Returns [(start, end, None)]."""
+def choose_cuts(total, candidates, part=None, begin=0.0):
+    """Back-to-back parts of ~part seconds from begin to total. Returns [(start, end, None)]."""
+    part = part or PART_SECONDS
+    early, late = min(EARLIEST, part * 0.3), min(LATEST, part * 0.2)
     candidates = sorted(candidates)
-    cuts, pos = [], 0.0
-    while total - pos > PART_SECONDS + LATEST:
-        target = pos + PART_SECONDS
-        cut = snap(target, candidates, EARLIEST, LATEST)
+    cuts, pos = [], begin
+    while total - pos > part + late:
+        target = pos + part
+        cut = snap(target, candidates, early, late)
         cuts.append((pos, cut, None))
         pos = cut
-    if cuts and total - pos < MIN_LAST_PART:
+    if cuts and total - pos < min(MIN_LAST_PART, part * 0.5):
         cuts[-1] = (cuts[-1][0], total, None)
     else:
         cuts.append((pos, total, None))
     return cuts
+
+
+def choose_stretch(total, score, candidates):
+    """'stretch' mode: the most interesting STRETCH_MINUTES, cut into back-to-back parts."""
+    L = int(min(STRETCH_MINUTES * 60, total))
+    lo = int(total * 0.01) if total > 1200 else 0
+    hi = int(total * 0.96) if total > 1200 else int(total)
+    pref = [0.0]
+    for v in score:
+        pref.append(pref[-1] + v)
+    best, best_s = -1.0, lo
+    for s in range(lo, max(lo + 1, hi - L + 1)):
+        e = min(len(score), s + L)
+        avg = (pref[e] - pref[s]) / max(1, e - s)
+        if avg > best:
+            best, best_s = avg, s
+    a = max(0.0, snap(float(best_s), candidates, 20, 5))
+    b = min(total, snap(float(best_s + L), candidates, 5, 20))
+    print(f"Best stretch: {fmt_time(a)} to {fmt_time(b)} (interest score {best * 100:.0f}/100)", flush=True)
+    return choose_cuts(b, candidates, STRETCH_PART_SECONDS, a)
 
 
 # ---------------------------------------------------------------- render
@@ -557,6 +597,43 @@ def flip_filter(src, start, end):
     return f"[0:v]split=2[n][m];[m]{f}[mf];[n][mf]overlay=0:0:enable='{when}',"
 
 
+CROP = {"filter": "", "w": None, "h": None}   # black bars to cut off, worked out once per movie
+
+
+def detect_black_bars(src, total):
+    """
+    Finds black bars that are part of the video itself (e.g. a widescreen film inside a
+    16:9 file) by sampling 9 moments. Keeps the biggest picture area seen, so dark
+    scenes can't make it cut into the picture.
+    """
+    CROP.update(filter="", w=None, h=None)
+    boxes = []
+    for k in range(1, 10):
+        t = total * k / 10
+        res = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostats", "-ss", f"{t:.1f}", "-t", "4", "-i", str(src),
+             "-an", "-sn", "-vf", "fps=2,cropdetect=limit=0.1:round=2:reset=0", "-f", "null", "-"],
+            capture_output=True, text=True,
+        )
+        found = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", res.stderr)
+        if found:
+            w, h, x, y = map(int, found[-1])
+            if w > 0 and h > 0:
+                boxes.append((x, y, x + w, y + h))
+    if not boxes:
+        return
+    st = json.loads(subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+         "-of", "json", str(src)], capture_output=True, text=True).stdout)["streams"][0]
+    W, H = int(st["width"]), int(st["height"])
+    x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+    x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+    w, h = (x1 - x0) // 2 * 2, (y1 - y0) // 2 * 2
+    if w * h < 0.97 * W * H and w > W * 0.5 and h > H * 0.3:
+        CROP.update(filter=f"crop={w}:{h}:{x0}:{y0},", w=w, h=h)
+        print(f"Cutting off black bars: picture is {w}x{h} of {W}x{H}", flush=True)
+
+
 def movie_bottom(src):
     """Where the bottom edge of the movie sits on the 1080x1920 screen."""
     out = subprocess.run(
@@ -566,7 +643,7 @@ def movie_bottom(src):
     ).stdout
     try:
         st = json.loads(out)["streams"][0]
-        w, h = float(st["width"]), float(st["height"])
+        w, h = float(CROP["w"] or st["width"]), float(CROP["h"] or st["height"])
         sar = st.get("sample_aspect_ratio", "1:1")
         if sar and ":" in sar and not sar.startswith("0"):
             a, b = sar.split(":")
@@ -603,7 +680,7 @@ def cockroach_filter(length):
     x0, y0 = edge_point(e)
     x1, y1 = edge_point((e + random.choice([1, 2, 2, 3])) % 4)
     dist = math.hypot(x1 - x0, y1 - y0)
-    secs = dist / random.uniform(300, 450)
+    secs = dist / random.uniform(170, 260)
     if length < secs + 2:
         return None
     t0 = random.uniform(min(1.0, length * 0.15), length - secs - 0.5)
@@ -627,28 +704,65 @@ def cockroach_filter(length):
     return inputs, filt
 
 
+SUB_SIZE = int(os.environ.get("SUBTITLE_SIZE", "54"))   # subtitle text size in pixels
+
+
+def wrap_line(text, width=30):
+    """Splits subtitle text into up to 3 evenly sized lines of about `width` characters."""
+    words = text.replace("\n", " ").split()
+    total = len(" ".join(words))
+    n = min(3, max(1, math.ceil(total / width)))
+    target = math.ceil(total / n)
+    lines, cur = [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > target and len(lines) < n - 1:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = f"{cur} {w}".strip()
+    lines.append(cur)
+    return [l for l in lines if l]
+
+
+def subtitle_filters(part_cues, length, bottom, workdir):
+    """Burns subtitles in, centred just under the picture (or near the bottom for tall videos)."""
+    out = []
+    y0 = bottom + 30 if bottom < 1650 else 1920 - 2 * (SUB_SIZE + 14) - 120
+    n = 0
+    for a, b, text in part_cues:
+        a, b = max(0.0, a), min(length, b)
+        if b <= a:
+            continue
+        for k, line in enumerate(wrap_line(text)):
+            n += 1
+            f = workdir / f"sub{n}.txt"
+            f.write_text(line, encoding="utf-8")
+            out.append(
+                f",drawtext=fontfile={FONT}:textfile={f.name}:expansion=none:fontsize={SUB_SIZE}:"
+                f"fontcolor=white:borderw=5:bordercolor=black:x=(w-text_w)/2:"
+                f"y={y0 + k * (SUB_SIZE + 14):.0f}:enable='between(t,{a:.3f},{b:.3f})'"
+            )
+    return "".join(out)
+
+
 def render_part(src, start, end, number, cues, out_path, workdir):
     # the flip happens first, so "Part X" and subtitles still read the right way round
+    first = flip_filter(src, start, end).replace("[0:v]", f"[0:v]{CROP['filter']}", 1)
     filters = (
-        f"{flip_filter(src, start, end)}split=2[bg][fg];"
+        f"{first}split=2[bg][fg];"
         "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
         "scale=270:480,boxblur=10:2,scale=1080:1920,eq=brightness=-0.08[bgb];"
         "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fgs];"
         "[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1"
     )
-    sub_file = workdir / "part.srt"
-    has_subs = bool(cues) and write_part_srt(cues, start, end, sub_file)
+    # subtitles: your .srt if there is one, otherwise made from this part's audio
+    part_cues = [(a - start, b - start, t) for a, b, t in cues if b > start and a < end]
     if not cues and AUTO_SUBS:
         try:
-            has_subs = write_part_srt(auto_subs(src, start, end, workdir), 0, end - start, sub_file)
+            part_cues = auto_subs(src, start, end, workdir)
         except Exception as e:
             print(f"  (no automatic subtitles for this part: {e})", flush=True)
-    if has_subs:
-        filters += (
-            ",subtitles=part.srt:original_size=1080x1920:force_style="
-            "'FontName=DejaVu Sans,Bold=1,Fontsize=12,PrimaryColour=&H00FFFFFF,"
-            "OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=60'"
-        )
+    filters += subtitle_filters(part_cues, end - start, movie_bottom(src), workdir)
     filters += (
         f",drawtext=fontfile={FONT}:text='Part {number}':fontsize=96:fontcolor=white:"
         "borderw=7:bordercolor=black:x=(w-text_w)/2:y=230"
@@ -668,7 +782,8 @@ def render_part(src, start, end, number, cues, out_path, workdir):
         "-movflags", "+faststart",
         str(out_path.resolve()),
     ], cwd=workdir)
-    sub_file.unlink(missing_ok=True)
+    for f in workdir.glob("sub*.txt"):
+        f.unlink(missing_ok=True)
 
 
 def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None):
@@ -679,6 +794,7 @@ def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None):
     """
     workdir.mkdir(parents=True, exist_ok=True)
     reset_flip()
+    detect_black_bars(src, duration(src))
     SUB_INFO.update(lang=None, note="from your .srt file" if srt else None)
     cues = parse_srt(srt)
     if MODE == "all":
@@ -688,7 +804,11 @@ def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None):
     else:
         total, loud, motion, cuts, quiet = analyse(src, workdir)
         candidates = quiet + subtitle_gaps(cues)
-        parts = choose_highlights(total, interest_scores(loud, motion, cuts, cues), candidates)
+        score = interest_scores(loud, motion, cuts, cues)
+        if MODE == "stretch":
+            parts = choose_stretch(total, score, candidates)
+        else:
+            parts = choose_highlights(total, score, candidates)
 
     print(f"{name}: {total/60:.1f} min -> {len(parts)} parts ({MODE} mode)", flush=True)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -701,7 +821,7 @@ def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None):
         print("  " + line, flush=True)
         lines.append(line)
     list_file = outdir / "_parts list.txt"
-    list_file.write_text("\n".join([name, f"Mode: {MODE}", ""] + lines) + "\n", encoding="utf-8")
+    list_file.write_text("\n".join([name, f"Mode: {MODE_NAMES.get(MODE, MODE)}", ""] + lines) + "\n", encoding="utf-8")
     if on_plan:
         on_plan(len(parts), list_file)
 
@@ -778,13 +898,36 @@ def is_link_file(entry):
     return entry["Name"].lower().endswith(".txt") and entry["Name"] != FINISHED_LOG
 
 
+def use_folder(folder):
+    """Switches the input/output folders and mode for the next file."""
+    global TO_EDIT, READY, MODE
+    TO_EDIT, READY, MODE = folder
+
+
 def list_to_edit():
-    """Files in 'To edit', oldest first (first come, first served)."""
+    """Files in the current 'To edit' folder, oldest first (first come, first served)."""
     out = subprocess.run(
         ["rclone", "lsjson", REMOTE + TO_EDIT, "--files-only"],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True,
     ).stdout
     return sorted(json.loads(out or "[]"), key=lambda e: e.get("ModTime", ""))
+
+
+def waiting_everywhere(tried):
+    """Every waiting file in every 'To edit' folder, oldest first: [(folder, entry)]."""
+    found = []
+    for folder in FOLDERS:
+        use_folder(folder)
+        for e in list_to_edit():
+            if (folder[0], e["Name"]) not in tried and (is_video(e) or is_link_file(e)):
+                found.append((folder, e))
+    return sorted(found, key=lambda fe: fe[1].get("ModTime", ""))
+
+
+def make_folders():
+    for to_edit, ready, _ in FOLDERS:
+        subprocess.run(["rclone", "mkdir", REMOTE + to_edit])
+        subprocess.run(["rclone", "mkdir", REMOTE + ready])
 
 
 def rc_move(src_name, dest_folder):
@@ -874,15 +1017,16 @@ def process_video(video, all_names):
 
 def main():
     """
-    Keeps going until 'To edit' is empty, always taking the oldest file next,
+    Keeps going until every 'To edit' folder is empty, always taking the oldest file next,
     so movies added while this is running get picked up in the same run.
     """
+    make_folders()
     tools_ready, tried = False, set()
     while True:
-        entries = [e for e in list_to_edit() if e["Name"] not in tried and (is_video(e) or is_link_file(e))]
+        entries = waiting_everywhere(tried)
         if not entries:
             if not tools_ready:
-                print("Nothing in 'To edit'.")
+                print("Nothing in any 'To edit' folder.")
             return
         if (time.time() - STARTED) / 60 > MAX_RUN_MINUTES:
             print("Time limit reached; the rest will be done in the next run.")
@@ -892,12 +1036,13 @@ def main():
             install_tools()
             tools_ready = True
 
-        nxt = entries[0]
-        tried.add(nxt["Name"])
+        folder, nxt = entries[0]
+        use_folder(folder)
+        tried.add((folder[0], nxt["Name"]))
         all_names = [e["Name"] for e in list_to_edit()]
         if is_link_file(nxt):
             for video in fetch_link_file(nxt["Name"]):  # a link's movie goes next, keeping its place in line
-                tried.add(video)
+                tried.add((folder[0], video))
                 process_video(video, all_names + [video])
         else:
             process_video(nxt["Name"], all_names)

@@ -15,7 +15,11 @@ jobs:
     timeout-minutes: 340
     env:
       # ---- settings you can change ----
-      MODE: "highlights"        # "highlights" = only the interesting parts, "all" = the whole video in parts
+      # Which folder you drop a movie into picks the mode:
+      #   "To edit" -> MODE below,  "To edit (All)" -> all,  "To edit (Best stretch)" -> best stretch
+      MODE: "highlights"        # mode for the plain "To edit" folder: "highlights", "all" or "stretch"
+      STRETCH_MINUTES: "12"     # best stretch mode: how many minutes of the movie to use
+      STRETCH_PART_SECONDS: "75" # best stretch mode: length of each part
       HIGHLIGHT_SECONDS: "75"   # highlights mode: length of each clip
       HIGHLIGHT_COUNT: "0"      # highlights mode: how many clips (0 = automatic, about 1 per 10 minutes)
       PART_SECONDS: "120"       # all mode: length of each part (2 minutes)
@@ -28,7 +32,7 @@ jobs:
       LINE_WIDTH: "360"         # its length in pixels (the video is 1080 wide)
       LINE_THICKNESS: "1"       # its thickness in pixels
       COCKROACH: "on"           # a little cockroach scuttles across the screen at a random moment
-      COCKROACH_CHANCE: "0.7"   # chance each part gets one (1 = every part)
+      COCKROACH_CHANCE: "1"     # chance each part gets one (1 = every part, 0.5 = half of them)
       COCKROACH_SIZE: "100"     # how long it is in pixels (the video is 1080 wide)
       FLIP_EVERY: "150"         # switch normal/flipped on a scene cut, at most once every 150s (2.5 min); "-1" = on every cut; "0" = flipped all the time
       CAPTIONS: "on"            # put a ready-to-post caption in each "Part X ready" notification
