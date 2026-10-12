@@ -230,7 +230,9 @@ def auto_subs(src, start, end, workdir):
         cues = words_to_lines(words)
         SUB_INFO["note"] = SUB_INFO["note"] or (
             f"translated to English from '{lang}'" if lang and lang != "en" else "made automatically (English)")
-        print(f"  subtitles: {len(cues)} lines" + (f', e.g. "{cues[0][2]}"' if cues else ""), flush=True)
+        print(f"  subtitles: {len(cues)} lines", flush=True)
+        for a, b, text in cues:
+            print(f"    {fmt_time(start + a)}  {text}", flush=True)
         return cues
     finally:
         wav.unlink(missing_ok=True)
