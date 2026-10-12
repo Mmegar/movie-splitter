@@ -20,6 +20,8 @@ jobs:
       #   all = "Whole movie" (everything back to back). Remove one to skip it, e.g. "highlights,stretch"
       MODES: "stretch,highlights"
       STRETCH_MINUTES: "12"     # best stretch mode: how many minutes of the movie to use
+      STRETCH_FROM: "0.20"      # best stretch: only look from 20% of the way through the movie...
+      STRETCH_TO: "0.75"        # ...to 75% (so it never spoils the ending)
       STRETCH_PART_SECONDS: "75" # best stretch mode: length of each part
       PART_MAX_EXTRA: "225"     # a part may run up to this many seconds longer to end at a good moment (75+225 = 5 min max)
       HIGHLIGHT_SECONDS: "75"   # highlights mode: length of each clip

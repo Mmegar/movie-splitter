@@ -55,6 +55,8 @@ MODES = [m.strip().lower() for m in os.environ.get("MODES", "highlights,stretch,
          if m.strip().lower() in MODE_NAMES] or ["highlights"]
 MODE = ""   # the mode being made right now (labels the notifications)
 STRETCH_MINUTES = float(os.environ.get("STRETCH_MINUTES", "12"))           # "stretch" mode: how much of the movie
+STRETCH_FROM = float(os.environ.get("STRETCH_FROM", "0.20"))   # "stretch" mode: only look from 20%...
+STRETCH_TO = float(os.environ.get("STRETCH_TO", "0.75"))       # ...to 75% of the way through (no spoiling the ending)
 STRETCH_PART_SECONDS = float(os.environ.get("STRETCH_PART_SECONDS", "75"))  # "stretch" mode: part length
 PART_SECONDS = float(os.environ.get("PART_SECONDS", "120"))      # "all" mode: part length
 EARLIEST = float(os.environ.get("CUT_EARLIEST", "25"))           # "all" mode: may cut this early...
@@ -609,8 +611,13 @@ def choose_cuts(total, candidates, part=None, begin=0.0):
 def choose_stretch(total, score, candidates):
     """'stretch' mode: the most interesting STRETCH_MINUTES, cut into back-to-back parts."""
     L = int(min(STRETCH_MINUTES * 60, total))
-    lo = int(total * 0.01) if total > 1200 else 0
-    hi = int(total * 0.96) if total > 1200 else int(total)
+    # only the middle of the movie: skip the start and the finale (no spoilers)
+    lo, hi = int(total * STRETCH_FROM), int(total * STRETCH_TO)
+    if hi - lo < L:                                   # short video: widen around the middle
+        mid = total * (STRETCH_FROM + STRETCH_TO) / 2
+        lo, hi = int(max(0, mid - L / 2 - 1)), int(min(total, mid + L / 2 + 1))
+        if hi - lo < L:
+            lo, hi = 0, int(total)
     pref = [0.0]
     for v in score:
         pref.append(pref[-1] + v)
