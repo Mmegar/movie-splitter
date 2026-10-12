@@ -59,6 +59,9 @@ STARTED = time.time()
 COCKROACH = os.environ.get("COCKROACH", "on").strip().lower() not in ("off", "no", "0", "false")
 COCKROACH_CHANCE = float(os.environ.get("COCKROACH_CHANCE", "0.7"))   # chance a part gets a cockroach run
 COCKROACH_SIZE = int(os.environ.get("COCKROACH_SIZE", "100"))         # length in pixels (screen is 1080 wide)
+LINE = os.environ.get("LINE", "on").strip().lower() not in ("off", "no", "0", "false")
+LINE_WIDTH = int(os.environ.get("LINE_WIDTH", "360"))       # pixels (screen is 1080 wide)
+LINE_THICKNESS = int(os.environ.get("LINE_THICKNESS", "5"))
 ASSETS = Path(__file__).resolve().parent / "assets"
 AUTO_SUBS = os.environ.get("AUTO_SUBTITLES", "on").strip().lower() not in ("off", "no", "0", "false")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
@@ -476,6 +479,37 @@ def flip_filter(src, start, end):
     return f"[0:v]split=2[n][m];[m]{f}[mf];[n][mf]overlay=0:0:enable='{when}',"
 
 
+def movie_bottom(src):
+    """Where the bottom edge of the movie sits on the 1080x1920 screen."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=width,height,sample_aspect_ratio", "-of", "json", str(src)],
+        capture_output=True, text=True,
+    ).stdout
+    try:
+        st = json.loads(out)["streams"][0]
+        w, h = float(st["width"]), float(st["height"])
+        sar = st.get("sample_aspect_ratio", "1:1")
+        if sar and ":" in sar and not sar.startswith("0"):
+            a, b = sar.split(":")
+            w *= float(a) / float(b)
+        fh = min(1920.0, 1080.0 * h / w)
+    except Exception:
+        fh = 608.0                     # assume a normal widescreen movie
+    return (1920 + fh) / 2
+
+
+def line_filter(src, length):
+    """A thin black line just under the movie that slowly slides left and right."""
+    if not LINE:
+        return ";[txt0]null[txt]"
+    y = min(1900.0, movie_bottom(src) + 14)
+    period = random.uniform(5, 8)
+    x = f"(W-w)/2+(W-w)/2*0.75*sin(2*PI*t/{period:.2f}+{random.uniform(0, 6.28):.2f})"
+    return (f";color=c=black:s={LINE_WIDTH}x{LINE_THICKNESS}:r=30:d={length:.3f}[ln];"
+            f"[txt0][ln]overlay=x='{x}':y={y:.0f}:eval=frame[txt]")
+
+
 def cockroach_filter(length):
     """
     Picks a random moment and a random path across the whole 1080x1920 screen.
@@ -540,8 +574,9 @@ def render_part(src, start, end, number, cues, out_path, workdir):
     filters += (
         f",drawtext=fontfile={FONT}:text='Part {number}':fontsize=96:fontcolor=white:"
         "borderw=7:bordercolor=black:x=(w-text_w)/2:y=230"
-        "[txt]"
+        "[txt0]"
     )
+    filters += line_filter(src, end - start)
     roach = cockroach_filter(end - start)
     extra_inputs = roach[0] if roach else []
     filters += roach[1] if roach else ";[txt]null[v]"
@@ -740,7 +775,10 @@ def process_video(video, all_names):
                      f"'{READY}/{name}'  -  subtitles: {SUB_INFO['note'] or 'none (no speech found)'}  "
                      f"(original file: {video})")
         print(f"Done: {name}", flush=True)
-        notify(f"✅ Finished: {name}", f"{len(files)} part{'s' if len(files) != 1 else ''} in {READY}/{name}.", ["tada"])
+        notify(f"✅ Finished: {name}",
+               f"{len(files)} part{'s' if len(files) != 1 else ''} in {READY}/{name}.\n"
+               f"🗑️ The big movie file ({video}) was deleted to free up space. "
+               f"It's in Google Drive's bin for 30 days, and listed in {TO_EDIT}/{FINISHED_LOG}.", ["tada"])
     except Exception as e:
         print(f"FAILED: {video}: {e}", flush=True)
         rc_move(video, FAILED)
