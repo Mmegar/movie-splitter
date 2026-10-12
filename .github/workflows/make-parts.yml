@@ -35,7 +35,7 @@ jobs:
       COCKROACH: "on"           # a small cockroach peeks in from the side of the picture, then runs off again
       COCKROACH_CHANCE: "1"     # chance each part gets one (1 = every part, 0.5 = half of them)
       COCKROACH_SIZE: "60"      # how long it is in pixels (the video is 1080 wide)
-      FLIP_EVERY: "150"         # switch normal/flipped on a scene cut, at most once every 150s (2.5 min); "-1" = on every cut; "0" = flipped all the time
+      FLIP_EVERY: "25-30"       # flip on a scene cut every 25-30 seconds (random each time); "-1" = every cut; "0" = always flipped
       CAPTIONS: "on"            # put a ready-to-post caption in each "Part X ready" notification
       # ---- phone notifications: the ntfy name is in the private file "notification name.txt" in the Drive folder ----
       # ---- Google Drive: the "TikTok automation" folder ----

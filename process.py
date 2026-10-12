@@ -64,7 +64,12 @@ HIGHLIGHT_COUNT = int(os.environ.get("HIGHLIGHT_COUNT", "0"))    # 0 = automatic
 MIN_LAST_PART = 30
 FLIP = os.environ.get("FLIP", "none").strip().lower()             # none / mirror / upsidedown / both
 FLIP_FILTERS = {"mirror": "hflip", "upsidedown": "vflip", "both": "hflip,vflip"}
-FLIP_EVERY = float(os.environ.get("FLIP_EVERY", "0"))  # >0: switch on scene cuts, at most once per this many seconds; 0: always flipped
+# FLIP_EVERY: "25-30" = switch on a scene cut every 25 to 30 seconds (random each time); "30" = every 30s;
+# "-1" = on every cut; "0" = flipped all the time
+_fe = os.environ.get("FLIP_EVERY", "0").replace(" ", "")
+_m = re.fullmatch(r"(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)", _fe)
+FLIP_MIN, FLIP_MAX = (float(_m.group(1)), float(_m.group(2))) if _m else (float(_fe), float(_fe))
+FLIP_EVERY = FLIP_MIN
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()   # phone notifications (ntfy app); if empty, read from Drive
 TOPIC_FILE = "notification name.txt"                     # private file in the Drive folder holding the ntfy name
 MAX_RUN_MINUTES = float(os.environ.get("MAX_RUN_MINUTES", "300"))  # don't start a new movie after this
@@ -578,11 +583,11 @@ def choose_stretch(total, score, candidates):
 
 
 # ---------------------------------------------------------------- render
-FLIP_STATE = {"on": False, "last": -1e9}   # carried from part to part within one movie
+FLIP_STATE = {"on": False, "last": -1e9, "gap": 0.0}   # carried from part to part within one movie
 
 
 def reset_flip():
-    FLIP_STATE.update(on=False, last=-1e9)
+    FLIP_STATE.update(on=False, last=-1e9, gap=0.0)
 
 
 def scene_cuts(src, start, length):
@@ -609,12 +614,12 @@ def flip_filter(src, start, end):
     length = end - start
     spans, on, since = [], FLIP_STATE["on"], 0.0
     for c in scene_cuts(src, start, length):
-        if c < 0.2 or start + c - FLIP_STATE["last"] < max(FLIP_EVERY, 0):
+        if c < 0.2 or start + c - FLIP_STATE["last"] < max(FLIP_STATE["gap"], 0):
             continue
         if on:
             spans.append((since, c))
         on, since = not on, c
-        FLIP_STATE.update(on=on, last=start + c)
+        FLIP_STATE.update(on=on, last=start + c, gap=random.uniform(FLIP_MIN, FLIP_MAX))
     if on:
         spans.append((since, length + 1))
     if not spans:
