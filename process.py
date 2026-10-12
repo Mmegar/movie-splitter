@@ -212,20 +212,24 @@ def auto_subs(src, start, end, workdir):
     """English subtitle lines for one part, timed from 0 = start of the part. [] if no speech."""
     wav = workdir / "part.wav"
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}",
-         "-i", str(src.resolve()), "-vn", "-ac", "1", "-ar", "16000", str(wav)])
+         "-i", str(src.resolve()), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)])
     try:
+        import numpy as np
+        import wave
+        with wave.open(str(wav)) as wf:   # read the audio ourselves (avoids a PyAV version clash)
+            audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
         model = whisper_model()
         opts = dict(vad_filter=True, word_timestamps=True, condition_on_previous_text=False, beam_size=5)
         lang = SUB_INFO["lang"]
         if not lang:
-            segs, info = model.transcribe(str(wav), **opts)
+            segs, info = model.transcribe(audio, **opts)
             if info.language_probability >= 0.6:
                 lang = SUB_INFO["lang"] = info.language
                 print(f"  spoken language: {lang} ({info.language_probability:.0%} sure)", flush=True)
         if lang and lang != "en":
-            segs, _ = model.transcribe(str(wav), language=lang, task="translate", **opts)
+            segs, _ = model.transcribe(audio, language=lang, task="translate", **opts)
         else:
-            segs, _ = model.transcribe(str(wav), language="en", **opts)
+            segs, _ = model.transcribe(audio, language="en", **opts)
         words = [w for seg in segs for w in (seg.words or [])]
         cues = words_to_lines(words)
         SUB_INFO["note"] = SUB_INFO["note"] or (
