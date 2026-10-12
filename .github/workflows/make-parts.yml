@@ -31,6 +31,7 @@ jobs:
       COCKROACH_CHANCE: "0.7"   # chance each part gets one (1 = every part)
       COCKROACH_SIZE: "100"     # how long it is in pixels (the video is 1080 wide)
       FLIP_EVERY: "150"         # switch normal/flipped on a scene cut, at most once every 150s (2.5 min); "-1" = on every cut; "0" = flipped all the time
+      CAPTIONS: "on"            # put a ready-to-post caption in each "Part X ready" notification
       # ---- phone notifications: install the "ntfy" app and subscribe to this name ----
       NTFY_TOPIC: "kimmeng-movies-b6c4562d7a"
       # ---- Google Drive: the "TikTok automation" folder ----

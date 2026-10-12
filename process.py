@@ -183,6 +183,84 @@ def write_part_srt(cues, start, end, out_path):
     return True
 
 
+# ---------------------------------------------------------------- captions (free, no AI)
+CAPTIONS_ON = os.environ.get("CAPTIONS", "on").strip().lower() not in ("off", "no", "0", "false")
+
+CAPTION_HOOKS = [
+    "Wait for it… 😳",
+    "Nobody talks about this part 👀",
+    "I wasn't ready for this 😭",
+    "Watch till the end 🤯",
+    "This scene lives in my head rent free",
+    "POV: you finally found something worth watching 🍿",
+    "Tell me you saw that coming 👇",
+    "The way I gasped 😮",
+    "Bro did NOT think this through 💀",
+    "Rate this scene 1-10 👇",
+    "Sound on for this one 🔊",
+    "I've watched this 10 times already 🔁",
+    "Things you notice on the second watch 👀",
+    "This is why I don't trust anyone 😶",
+    "Okay but why is this so good",
+    "Stop scrolling, you need to see this ✋",
+    "Not me staying up till 3am for this 🌙",
+    "Plot twist incoming 🌀",
+    "Tag someone who needs to see this 👇",
+    "The ending of this part 😳",
+    "Me pretending I understood everything 🤡",
+    "Who else remembers this? 🙋",
+    "This deserves way more attention",
+    "Comment if you know what happens next 👇",
+    "Hardest scene ever? 🔥",
+    "The tension in this one 😬",
+    "Save this for later 📌",
+    "I need answers 😩",
+    "Just one more part… said everyone 😅",
+    "Bet you can't watch just one 😏",
+    "Late night watch 🍿🌙",
+    "No way this actually happened 😮",
+    "The vibes are unmatched ✨",
+    "Lowkey the best part 🤫",
+    "Pause at the right moment 😂",
+    "Main character energy 😎",
+    "Can't believe I almost skipped this",
+    "This hits different at night 🌌",
+    "Rewatching this hits even harder",
+    "Drop a 🔥 if you're still watching",
+]
+CAPTION_ENDINGS = [
+    "Part {next} is up next 👀",
+    "Follow so you don't miss Part {next} 🔔",
+    "Part {next} coming soon ⏳",
+    "Should I post Part {next}? 👇",
+    "Comment 'more' for Part {next} 👇",
+]
+CAPTION_LAST = [
+    "That's the last part. Follow for more 🍿",
+    "Final part! What did you think? 👇",
+    "And that's a wrap 🎬 Follow for the next one",
+]
+HASHTAG_SETS = [
+    "#fyp #foryou #viral #movie #movieclips",
+    "#fyp #foryoupage #movies #film #mustwatch",
+    "#viral #fyp #movietok #filmtok #scene",
+    "#foryou #trending #movie #cinema #fypシ",
+    "#fyp #movieclip #filmclips #viralvideo #watch",
+]
+
+
+def make_captions(count):
+    """One caption per part: a random hook, a 'next part' line, and hashtags. No repeats within a movie."""
+    hooks = random.sample(CAPTION_HOOKS, k=min(count, len(CAPTION_HOOKS)))
+    while len(hooks) < count:
+        hooks.append(random.choice(CAPTION_HOOKS))
+    out = []
+    for i in range(1, count + 1):
+        end = (random.choice(CAPTION_ENDINGS).format(next=i + 1) if i < count else random.choice(CAPTION_LAST))
+        out.append(f"{hooks[i - 1]}\nPart {i} 🎬 · {end}\n{random.choice(HASHTAG_SETS)}")
+    return out
+
+
 # ---------------------------------------------------------------- automatic subtitles (Whisper)
 _WHISPER = None
 SUB_INFO = {"lang": None, "note": None}   # per movie: spoken language, and what kind of subs were used
@@ -754,11 +832,16 @@ def process_video(video, all_names):
         run(["rclone", "copyto", str(list_file), f"{dest}/{list_file.name}"])
         notify(f"{name}: {count} part{'s' if count != 1 else ''} planned", f"Making Part 1 of {count} now.", ["scissors"])
 
+    captions = []
+
     def on_part(i, count, out, line):
         run(["rclone", "copyto", str(out), f"{dest}/{out.name}"])
         out.unlink(missing_ok=True)  # free up disk space straight away
+        if CAPTIONS_ON and not captions:
+            captions.extend(make_captions(count))
+        caption = f"\n\n📝 Caption:\n{captions[i - 1]}" if captions else ""
         notify(f"{name}: Part {i} of {count} ready",
-               f"{line}\nIt's in {READY}/{name}.", ["white_check_mark"] if i == count else ["film_frames"])
+               f"{line}\nIt's in {READY}/{name}.{caption}", ["white_check_mark"] if i == count else ["film_frames"])
 
     try:
         run(["rclone", "copy", f"{REMOTE}{TO_EDIT}/{video}", str(WORK / "in"), "--stats-one-line", "--stats", "30s"])
