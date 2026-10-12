@@ -43,7 +43,8 @@ HIGHLIGHT_SECONDS = float(os.environ.get("HIGHLIGHT_SECONDS", "75"))  # "highlig
 HIGHLIGHT_COUNT = int(os.environ.get("HIGHLIGHT_COUNT", "0"))    # 0 = automatic (about 1 per 10 min)
 MIN_LAST_PART = 30
 FLIP = os.environ.get("FLIP", "none").strip().lower()             # none / mirror / upsidedown / both
-FLIP_FILTERS = {"mirror": "hflip,", "upsidedown": "vflip,", "both": "hflip,vflip,"}
+FLIP_FILTERS = {"mirror": "hflip", "upsidedown": "vflip", "both": "hflip,vflip"}
+FLIP_EVERY = float(os.environ.get("FLIP_EVERY", "0"))  # >0: switch on scene cuts, at most once per this many seconds; 0: always flipped
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()               # phone notifications (ntfy app)
 MAX_RUN_MINUTES = float(os.environ.get("MAX_RUN_MINUTES", "300"))  # don't start a new movie after this
 STARTED = time.time()
@@ -345,10 +346,58 @@ def choose_cuts(total, candidates):
 
 
 # ---------------------------------------------------------------- render
+FLIP_STATE = {"on": False, "last": -1e9}   # carried from part to part within one movie
+
+
+def reset_flip():
+    FLIP_STATE.update(on=False, last=-1e9)
+
+
+def scene_cuts(src, start, length):
+    """Exact times (seconds from the part's start) where the shot changes."""
+    res = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-ss", f"{start:.3f}", "-t", f"{length:.3f}",
+         "-i", str(src.resolve()), "-an", "-sn",
+         "-vf", "scale=192:-2,select='gt(scene,0.35)',showinfo", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    return sorted(float(x) for x in re.findall(r"showinfo.*?pts_time:([\d.]+)", res.stderr))
+
+
+def flip_filter(src, start, end):
+    """
+    Video filter for the flip. With FLIP_EVERY > 0 the picture switches between normal and
+    flipped only on a scene cut, and at most once every FLIP_EVERY seconds of movie time.
+    """
+    f = FLIP_FILTERS.get(FLIP)
+    if not f:
+        return "[0:v]"
+    if FLIP_EVERY <= 0 and FLIP_EVERY != -1:
+        return f"[0:v]{f},"
+    length = end - start
+    spans, on, since = [], FLIP_STATE["on"], 0.0
+    for c in scene_cuts(src, start, length):
+        if c < 0.2 or start + c - FLIP_STATE["last"] < max(FLIP_EVERY, 0):
+            continue
+        if on:
+            spans.append((since, c))
+        on, since = not on, c
+        FLIP_STATE.update(on=on, last=start + c)
+    if on:
+        spans.append((since, length + 1))
+    if not spans:
+        return "[0:v]"
+    if len(spans) == 1 and spans[0][0] == 0 and spans[0][1] > length:
+        return f"[0:v]{f},"
+    when = "+".join(f"between(t,{a:.3f},{b - 0.001:.3f})" for a, b in spans)
+    print(f"  flipped stretches: {[(round(a, 1), round(min(b, length), 1)) for a, b in spans]}", flush=True)
+    return f"[0:v]split=2[n][m];[m]{f}[mf];[n][mf]overlay=0:0:enable='{when}',"
+
+
 def render_part(src, start, end, number, cues, out_path, workdir):
     # the flip happens first, so "Part X" and subtitles still read the right way round
     filters = (
-        f"[0:v]{FLIP_FILTERS.get(FLIP, '')}split=2[bg][fg];"
+        f"{flip_filter(src, start, end)}split=2[bg][fg];"
         "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
         "scale=270:480,boxblur=10:2,scale=1080:1920,eq=brightness=-0.08[bgb];"
         "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fgs];"
@@ -385,6 +434,7 @@ def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None):
     runs right after each part is finished, so it can be uploaded straight away.
     """
     workdir.mkdir(parents=True, exist_ok=True)
+    reset_flip()
     cues = parse_srt(srt)
     if MODE == "all":
         total = duration(src)

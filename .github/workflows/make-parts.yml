@@ -22,6 +22,7 @@ jobs:
       CUT_EARLIEST: "25"        # all mode: may end a part up to 25s early to land on a pause...
       CUT_LATEST: "15"          # ...or up to 15s late
       FLIP: "mirror"            # "none", "mirror" (left-right), "upsidedown", or "both"
+      FLIP_EVERY: "150"         # switch normal/flipped on a scene cut, at most once every 150s (2.5 min); "-1" = on every cut; "0" = flipped all the time
       # ---- phone notifications: install the "ntfy" app and subscribe to this name ----
       NTFY_TOPIC: "kimmeng-movies-b6c4562d7a"
       # ---- Google Drive: the "TikTok automation" folder ----
