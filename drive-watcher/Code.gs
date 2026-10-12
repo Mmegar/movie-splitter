@@ -21,7 +21,7 @@ const TO_EDIT_FOLDER_ID = '1Mf-bBD8AZofLMk31EQzMlVVlbcDQN5_-';
 const FOLDERS = [{ name: 'To edit', mode: '' }];
 const VIDEO_EXT = /\.(mkv|mp4|avi|mov|m4v|wmv|webm|mpg|mpeg|ts|ogv|txt)$/i;
 const IGNORE = ['Finished.txt'];                // the splitter's own list of finished movies
-const NTFY_TOPIC = 'kimmeng-movies-b6c4562d7a';  // same as in the GitHub workflow
+const TOPIC_FILE = 'notification name.txt';      // private file next to "To edit" holding the ntfy name
 
 function checkForNewVideos() {
   const waiting = waitingFiles();
@@ -84,15 +84,23 @@ function rememberNew(waiting) {
   return fresh;
 }
 
+function ntfyTopic() {
+  const parents = DriveApp.getFolderById(TO_EDIT_FOLDER_ID).getParents();
+  if (!parents.hasNext()) return '';
+  const it = parents.next().getFilesByName(TOPIC_FILE);
+  return it.hasNext() ? it.next().getBlob().getDataAsString().trim() : '';
+}
+
 function tellPhone(files, status) {
-  if (!files.length || !NTFY_TOPIC) return;
+  const topic = files.length ? ntfyTopic() : '';
+  if (!topic) return;
   const names = files.map(f => '• ' + f.name + (f.mode ? `  (${f.mode})` : '')).join('\n');
   const title = files.length === 1 ? '📥 New file found in "To edit"' : `📥 ${files.length} new files found in "To edit"`;
   try {
     UrlFetchApp.fetch('https://ntfy.sh/', {
       method: 'post',
       contentType: 'application/json',
-      payload: JSON.stringify({ topic: NTFY_TOPIC, title: title, message: names + '\n\n' + status, tags: ['inbox_tray'] }),
+      payload: JSON.stringify({ topic: topic, title: title, message: names + '\n\n' + status, tags: ['inbox_tray'] }),
       muteHttpExceptions: true,
     });
   } catch (e) {

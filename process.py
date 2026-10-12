@@ -65,7 +65,8 @@ MIN_LAST_PART = 30
 FLIP = os.environ.get("FLIP", "none").strip().lower()             # none / mirror / upsidedown / both
 FLIP_FILTERS = {"mirror": "hflip", "upsidedown": "vflip", "both": "hflip,vflip"}
 FLIP_EVERY = float(os.environ.get("FLIP_EVERY", "0"))  # >0: switch on scene cuts, at most once per this many seconds; 0: always flipped
-NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()               # phone notifications (ntfy app)
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()   # phone notifications (ntfy app); if empty, read from Drive
+TOPIC_FILE = "notification name.txt"                     # private file in the Drive folder holding the ntfy name
 MAX_RUN_MINUTES = float(os.environ.get("MAX_RUN_MINUTES", "300"))  # don't start a new movie after this
 STARTED = time.time()
 COCKROACH = os.environ.get("COCKROACH", "on").strip().lower() not in ("off", "no", "0", "false")
@@ -95,13 +96,22 @@ def run(cmd, **kw):
     return subprocess.run(cmd, check=True, **kw)
 
 
+def ntfy_topic():
+    """The ntfy name: from the workflow if set, otherwise from the private file in Google Drive."""
+    global NTFY_TOPIC
+    if not NTFY_TOPIC:
+        out = subprocess.run(["rclone", "cat", f"{REMOTE}{TOPIC_FILE}"], capture_output=True, text=True).stdout
+        NTFY_TOPIC = out.strip() or "-"
+    return "" if NTFY_TOPIC == "-" else NTFY_TOPIC
+
+
 def notify(title, message, tags=None):
     """Sends a phone notification through the ntfy app. Never stops the run if it fails."""
-    if not NTFY_TOPIC:
+    if not ntfy_topic():
         return
     if MODE:
         title = f"[{MODE_NAMES.get(MODE, MODE)}] {title}"
-    body = json.dumps({"topic": NTFY_TOPIC, "title": title, "message": message, "tags": tags or []}).encode()
+    body = json.dumps({"topic": ntfy_topic(), "title": title, "message": message, "tags": tags or []}).encode()
     try:
         req = urllib.request.Request("https://ntfy.sh/", data=body, headers={"Content-Type": "application/json"})
         urllib.request.urlopen(req, timeout=15).read()
