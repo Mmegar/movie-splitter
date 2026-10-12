@@ -32,7 +32,7 @@ jobs:
       LINE: "on"                # a thin, see-through black line right across the picture (near its bottom), not moving
       LINE_OPACITY: "0.45"      # how dark the line is: 1 = solid black, 0.2 = very faint
       LINE_THICKNESS: "1"       # its thickness in pixels
-      COCKROACH: "on"           # a small cockroach peeks in from the side of the picture, then runs off again
+      COCKROACH: "on"           # a small cockroach peeks in from the side of the picture, then runs up and off the top
       COCKROACH_CHANCE: "1"     # chance each part gets one (1 = every part, 0.5 = half of them)
       COCKROACH_SIZE: "60"      # how long it is in pixels (the video is 1080 wide)
       FLIP_EVERY: "25-30"       # flip on a scene cut every 25-30 seconds (random each time); "-1" = every cut; "0" = always flipped

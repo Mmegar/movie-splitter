@@ -701,8 +701,8 @@ def line_filter(src, length):
 def cockroach_filter(length, src):
     """
     A small cockroach peeks in from the left or right side: it walks a little way onto the
-    edge of the picture, stops for a moment, then turns and scuttles back off the same side.
-    It never crosses the middle of the movie.
+    edge of the picture, stops for a moment, then turns and scuttles up and off the top of
+    the screen, staying near the edge. It never crosses the middle of the movie.
     Returns (extra ffmpeg inputs, filter text from [txt] to [v]) or None.
     """
     if not COCKROACH or random.random() > COCKROACH_CHANCE:
@@ -718,11 +718,12 @@ def cockroach_filter(length, src):
     tx = reach if left else W - reach
     y0 = random.uniform(lo, hi)
     ty = min(hi, max(lo, y0 + random.uniform(-110, 110)))
-    y1 = min(1900.0, max(20.0, ty + random.uniform(-260, 260)))
+    ex = min(W - 40.0, max(40.0, tx + random.uniform(-40, 40)))   # exit straight up near the edge
+    ey = -size
     speed = random.uniform(140, 200)
     pause = random.uniform(0.3, 0.8)
     d1 = math.hypot(tx - off, ty - y0) / speed
-    d2 = math.hypot(off - tx, y1 - ty) / speed
+    d2 = math.hypot(ex - tx, ey - ty) / random.uniform(260, 340)      # a quicker dash upward
     total = d1 + pause + d2
     if length < total + 2:
         return None
@@ -730,10 +731,10 @@ def cockroach_filter(length, src):
     # (start, end, from x, from y, to x, to y, moving?)
     segs = [(t0, t0 + d1, off, y0, tx, ty, True),
             (t0 + d1, t0 + d1 + pause, tx, ty, tx, ty, False),
-            (t0 + d1 + pause, t0 + total, tx, ty, off, y1, True)]
+            (t0 + d1 + pause, t0 + total, tx, ty, ex, ey, True)]
     inputs, filt, n, last = [], "", 0, "txt"
     for k, (a, b, xa, ya, xb, yb, moving) in enumerate(segs):
-        ang = math.atan2((ty - y0) if k < 2 else (y1 - ty), (tx - off) if k < 2 else (off - tx))
+        ang = math.atan2((ty - y0) if k < 2 else (ey - ty), (tx - off) if k < 2 else (ex - tx))
         sprite = (f"scale={size}:-1,format=rgba,"
                   f"rotate={ang:.4f}:c=none:ow=rotw({ang:.4f}):oh=roth({ang:.4f})")
         dur = max(b - a, 0.001)
@@ -748,7 +749,7 @@ def cockroach_filter(length, src):
             filt += (f";[{n}:v]{sprite}[s{n}];[{last}][s{n}]overlay=x='{x}':y='{y}':eval=frame:"
                      f"enable='between(t,{a:.3f},{b:.3f})*{legs}'[{out}]")
             last = out
-    print(f"  cockroach peeks in from the {'left' if left else 'right'} at {t0:.1f}s-{t0 + total:.1f}s", flush=True)
+    print(f"  cockroach peeks in from the {'left' if left else 'right'}, then runs up, at {t0:.1f}s-{t0 + total:.1f}s", flush=True)
     return inputs, filt
 
 
