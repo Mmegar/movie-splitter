@@ -11,15 +11,18 @@ running; step 6 (TikTok auto-posting) can wait.
 2. Name: `movie-splitter-v2` · **Public** (free unlimited minutes) · leave it **empty**: no README.
 3. Tell Claude "repo created". Claude pushes v2 into it.
 
-## 2. Make a new Google Drive folder (3 min)
+## 2. Google Drive folder ✅ done by Claude
 
-v2 uses its **own** folder, so it never clashes with your current splitter.
+Created in your My Drive:
 
-1. In Google Drive, create a folder: **TikTok automation v2**.
-2. Open it. Copy the ID from the address bar, the part after `/folders/`. You need it in step 4 (`GDRIVE_ROOT_FOLDER_ID`).
-3. Inside it, create a text file **notification name.txt** containing a new ntfy name, for example
-   `kimmeng-v2-` plus some random letters. Subscribe to that name in the ntfy app on your iPhone.
-4. Inside it, create a folder **To edit**. Copy its ID too (for step 5).
+| Item | ID (you'll paste these later) |
+|---|---|
+| **TikTok automation v2** (main folder) → `GDRIVE_ROOT_FOLDER_ID` | `1IQK7I_n3ug3tC263Q-D_5MNHQPvfnzaT` |
+| **To edit** → watcher `TO_EDIT_FOLDER_ID` | `1vea1cWIJEMd2ekkatYE54fwMeqGlv1em` |
+| **Ready to post** | `10LRgv2f_yIX9eWW-imIkWICJPSpGHpSc` |
+| **notification name.txt** contains | `kimmeng-v2-bn8m2wdq82uj6r` |
+
+Your only job here: **subscribe to `kimmeng-v2-bn8m2wdq82uj6r` in the ntfy app** on your iPhone.
 
 ## 3. Laptop (15–20 min)
 
