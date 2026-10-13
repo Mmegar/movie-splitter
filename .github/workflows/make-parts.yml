@@ -1,59 +1,50 @@
 name: Make TikTok parts
 
+# All the cutting settings (modes, flips, cockroach, quality...) now live in config/settings.json,
+# which the iPhone app edits. To override one just for this workflow, add it under "env:" below
+# with its old name, e.g.  MODES: "stretch"
+#
+# Secrets / variables to set once (GitHub > repo > Settings > Secrets and variables > Actions):
+#   GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET, GDRIVE_REFRESH_TOKEN   your Google Drive (rclone) login
+#   GDRIVE_ROOT_FOLDER_ID   the ID of the "TikTok automation v2" Drive folder (the part of its link after
+#                           /folders/). Can be a secret or a variable.
+
 on:
   schedule:
     - cron: "17 14 * * *"   # once a day, about 3am New Zealand time (GitHub may start it a little late)
-  workflow_dispatch:         # "Run workflow" button; the Google Drive watcher also starts it this way
+  workflow_dispatch:         # "Run workflow" button; the Google Drive watcher and the app also start it this way
 
 concurrency:
   group: make-parts
   cancel-in-progress: false
+
+permissions:
+  contents: write            # lets the run save live progress to the "status" branch (for the iPhone app)
 
 jobs:
   make-parts:
     runs-on: ubuntu-latest
     timeout-minutes: 355
     env:
-      # ---- settings you can change ----
-      # Every movie is made in each of these, each into its own subfolder of "Ready to post/<movie>":
-      #   highlights = "Highlights" (best moments), stretch = "Best stretch" (best few minutes back to back),
-      #   all = "Whole movie" (everything back to back). Remove one to skip it, e.g. "highlights,stretch"
-      MODES: "stretch,highlights"
-      STRETCH_MINUTES: "12"     # best stretch mode: how many minutes of the movie to use
-      STRETCH_FROM: "0.20"      # best stretch: only look from 20% of the way through the movie...
-      STRETCH_TO: "0.75"        # ...to 75% (so it never spoils the ending)
-      STRETCH_PART_SECONDS: "75" # best stretch mode: length of each part
-      PART_MAX_EXTRA: "225"     # a part may run up to this many seconds longer to end at a good moment (75+225 = 5 min max)
-      HIGHLIGHT_SECONDS: "75"   # highlights mode: length of each clip
-      HIGHLIGHT_COUNT: "0"      # highlights mode: how many clips (0 = automatic, about 1 per 10 minutes)
-      PART_SECONDS: "120"       # all mode: length of each part (2 minutes)
-      CUT_EARLIEST: "25"        # all mode: may end a part up to 25s early to land on a pause...
-      CUT_LATEST: "15"          # ...or up to 15s late
-      FLIP: "mirror"            # "none", "mirror" (left-right), "upsidedown", or "both"
-      AUTO_SUBTITLES: "on"      # "on" = make English subtitles from the audio when there's no .srt, "off" = don't
-      WHISPER_MODEL: "small"    # speech model: "base" (faster), "small" (good), "medium" (best but slow)
-      LINE: "on"                # a thin, see-through black line right across the picture (near its bottom), not moving
-      LINE_OPACITY: "0.45"      # how dark the line is: 1 = solid black, 0.2 = very faint
-      LINE_THICKNESS: "1"       # its thickness in pixels
-      COCKROACH: "on"           # a small cockroach peeks in from the side of the picture, then runs up and off the top
-      COCKROACH_CHANCE: "1"     # chance each part gets one (1 = every part, 0.5 = half of them)
-      COCKROACH_SIZE: "60"      # how long it is in pixels (the video is 1080 wide)
-      FLIP_EVERY: "25-30"       # flip on a scene cut every 25-30 seconds (random each time); "-1" = every cut; "0" = always flipped
-      CAPTIONS: "on"            # put a ready-to-post caption in each "Part X ready" notification
-      # ---- phone notifications: the ntfy name is in the private file "notification name.txt" in the Drive folder ----
-      # ---- Google Drive: the "TikTok automation" folder ----
+      # ---- Google Drive: the "TikTok automation v2" folder ----
       RCLONE_CONFIG_GDRIVE_TYPE: drive
       RCLONE_CONFIG_GDRIVE_SCOPE: drive
-      RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: "1nk5jCp9xOYGOO1m4KUPKqSUdtQOGfUFf"
+      RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID || vars.GDRIVE_ROOT_FOLDER_ID }}
       RCLONE_CONFIG_GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
       RCLONE_CONFIG_GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
       RCLONE_CONFIG_GDRIVE_TOKEN: '{"access_token":"","token_type":"Bearer","refresh_token":"${{ secrets.GDRIVE_REFRESH_TOKEN }}","expiry":"2000-01-01T00:00:00Z"}'
+      # ---- live status for the app (saved to the "status" branch) ----
+      GITHUB_TOKEN: ${{ github.token }}
+      # ---- phone notifications: the ntfy name is in the private file "notification name.txt" in the Drive folder ----
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Read settings
+        run: python3 -c "import settings; s = settings.load(); print('WHISPER_MODEL=' + str(s['whisper_model']))" >> "$GITHUB_ENV"
 
       - name: Keep the speech model between runs
         uses: actions/cache@v4
@@ -77,5 +68,5 @@ jobs:
         if: failure() || cancelled()
         run: |
           curl -s -H "Title: Movie run stopped" -H "Tags: warning" \
-            -d "The GitHub run failed or was cancelled. Open the GitHub app > movie-splitter > Actions to see why." \
+            -d "The GitHub run failed or was cancelled. Open the GitHub app > movie-splitter-v2 > Actions to see why." \
             "https://ntfy.sh/$(rclone cat 'gdrive:notification name.txt' | tr -d '[:space:]')" || true

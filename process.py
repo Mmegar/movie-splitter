@@ -5,8 +5,8 @@ Google Drive layout (inside your "TikTok automation" folder):
 
     To edit/            <- drop videos here (and an optional .srt with the same name),
                            OR a .txt file containing an archive.org link.
-                           Finished originals are DELETED (to Drive's bin) and listed
-                           in "Finished.txt" in this folder.
+                           Finished originals are DELETED (for good, or to Drive's bin:
+                           setting "delete_originals") and listed in "Finished.txt" here.
     Ready to post/
         <Movie name>/
             Highlights/      <- one subfolder per mode in MODES
@@ -42,6 +42,13 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+import settings
+import status
+
+# Settings come from config/settings.json (the iPhone app edits it). Any environment variable
+# with the old v1 name (MODES, FLIP_EVERY, COCKROACH_SIZE, ...) still wins over the file.
+SETTINGS = settings.apply_to_env()
 
 REMOTE = "gdrive:"
 TO_EDIT = "To edit"
@@ -88,6 +95,11 @@ ASSETS = Path(__file__).resolve().parent / "assets"
 AUTO_SUBS = os.environ.get("AUTO_SUBTITLES", "on").strip().lower() not in ("off", "no", "0", "false")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
 FONT = os.environ.get("FONT_FILE", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+VIDEO_QUALITY = int(float(os.environ.get("VIDEO_QUALITY", "23")))   # x264 CRF: 18 = best/biggest ... 28 = smallest
+# "permanent" = finished originals are deleted for good (saves Drive space); "bin" = Drive's bin for 30 days
+DELETE_ORIGINALS = os.environ.get("DELETE_ORIGINALS", "permanent").strip().lower()
+CLEANUP_DAYS = float(os.environ.get("CLEANUP_PARTS_AFTER_DAYS", "0"))   # delete parts older than this; 0 = never
+TZ = ZoneInfo(SETTINGS["posting"]["timezone"])
 WORK = Path("work")
 
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".ogv"}
@@ -114,12 +126,17 @@ def ntfy_topic():
     return "" if NTFY_TOPIC == "-" else NTFY_TOPIC
 
 
-def notify(title, message, tags=None):
-    """Sends a phone notification through the ntfy app. Never stops the run if it fails."""
-    if not ntfy_topic():
-        return
+def notify(title, message, tags=None, kind="info"):
+    """
+    Sends a phone notification through the ntfy app, and adds the same message to the
+    iPhone app's event list (kind = started / planned / part_ready / finished / failed / ...).
+    Never stops the run if it fails.
+    """
     if MODE:
         title = f"[{MODE_NAMES.get(MODE, MODE)}] {title}"
+    status.add_event(kind, title, message, urgent=kind in ("finished", "failed", "posted", "post_failed"))
+    if not ntfy_topic():
+        return
     body = json.dumps({"topic": ntfy_topic(), "title": title, "message": message, "tags": tags or []}).encode()
     try:
         req = urllib.request.Request("https://ntfy.sh/", data=body, headers={"Content-Type": "application/json"})
@@ -877,13 +894,16 @@ def render_part(src, start, end, number, cues, out_path, workdir):
         "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(src.resolve()),
         *extra_inputs,
         "-filter_complex", filters, "-map", "[v]", "-map", "0:a:0?",
-        "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
+        "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_QUALITY), "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "160k", "-ac", "2",
         "-movflags", "+faststart",
         str(out_path.resolve()),
     ], cwd=workdir)
     for f in workdir.glob("sub*.txt"):
         f.unlink(missing_ok=True)
+
+
+PART_TIMES = {}   # (mode, part number) -> (start, end) in the movie, for the status file
 
 
 def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None, modes=None):
@@ -899,9 +919,12 @@ def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None, m
     detect_black_bars(src, duration(src))
     SUB_INFO.update(lang=None, note="from your .srt file" if srt else None, full=False)
     cues = parse_srt(srt)
+    status.set_stage("analysing", movie=name, mode=None)
     total, loud, motion, cuts, quiet = analyse(src, workdir)
+    status.movie_duration(name, total)
     if not cues and AUTO_SUBS and "all" in modes:
         try:
+            status.set_stage("subtitles")
             cues = auto_subs_full(src, workdir)
         except Exception as e:
             print(f"(no automatic subtitles: {e})", flush=True)
@@ -910,6 +933,7 @@ def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None, m
     score = interest_scores(loud, motion, cuts, cues)
 
     plans = []
+    status.set_stage("planning")
     for mode in modes:
         MODE = mode
         if mode == "all":
@@ -944,7 +968,9 @@ def process_local(src, name, srt, outdir, workdir, on_plan=None, on_part=None, m
         for i, ((a, b, _), line) in enumerate(zip(parts, lines), 1):
             out = mdir / f"{name} - Part {str(i).zfill(width)}.mp4"
             print(f"Making {label} part {i} of {len(parts)}...", flush=True)
+            status.set_stage("rendering", mode=mode, part=i, parts_total=len(parts))
             render_part(src, a, b, i, cues, out, workdir)
+            PART_TIMES[(mode, i)] = (a, b)
             files.append(out)
             if on_part:
                 on_part(mode, i, len(parts), out, line)
@@ -997,7 +1023,7 @@ def fetch_link_file(f):
         except Exception as e:
             ok = False
             print(f"FAILED link {url}: {e}", flush=True)
-            notify("Link failed", f"Couldn't download {url}\n{e}", ["x"])
+            notify("Link failed", f"Couldn't download {url}\n{e}", ["x"], kind="failed")
     if ok:
         rc_delete(f)
     else:
@@ -1028,9 +1054,19 @@ def rc_move(src_name, dest_folder):
     subprocess.run(["rclone", "moveto", f"{REMOTE}{TO_EDIT}/{src_name}", f"{REMOTE}{dest_folder}/{src_name}"])
 
 
+def trash_flag():
+    """'bin' = deleted files go to Google Drive's bin (30 days); 'permanent' = gone for good."""
+    return "--drive-use-trash=true" if DELETE_ORIGINALS == "bin" else "--drive-use-trash=false"
+
+
 def rc_delete(name):
-    """Deletes a file from 'To edit'. It goes to Google Drive's bin, so it can be restored for 30 days."""
-    subprocess.run(["rclone", "deletefile", "--drive-use-trash=true", f"{REMOTE}{TO_EDIT}/{name}"])
+    """Deletes a file from 'To edit': for good, or to Google Drive's bin (setting "delete_originals")."""
+    subprocess.run(["rclone", "deletefile", trash_flag(), f"{REMOTE}{TO_EDIT}/{name}"])
+
+
+def deleted_where():
+    return ("in Google Drive's bin for 30 days" if DELETE_ORIGINALS == "bin"
+            else "deleted for good, to save Drive space")
 
 
 def log_finished(line):
@@ -1038,14 +1074,46 @@ def log_finished(line):
     remote = f"{REMOTE}{TO_EDIT}/{FINISHED_LOG}"
     old = subprocess.run(["rclone", "cat", remote], capture_output=True, text=True).stdout
     if not old.strip():
-        old = "Finished movies. The original files were deleted (they're in Google Drive's bin for 30 days).\n\n"
+        old = f"Finished movies. The original files were deleted ({deleted_where()}).\n\n"
     local = Path("finished_log.txt")
     local.write_text(old.rstrip("\n") + "\n" + line + "\n", encoding="utf-8")
     subprocess.run(["rclone", "copyto", str(local), remote])
     local.unlink(missing_ok=True)
 
 
+def cleanup_old_parts():
+    """Setting "cleanup_parts_after_days": deletes finished parts older than that, then empty folders."""
+    if CLEANUP_DAYS <= 0:
+        return
+    print(f"Deleting parts in '{READY}' older than {CLEANUP_DAYS:g} days...", flush=True)
+    subprocess.run(["rclone", "delete", f"{REMOTE}{READY}", "--min-age", f"{CLEANUP_DAYS:g}d", trash_flag()])
+    subprocess.run(["rclone", "rmdirs", f"{REMOTE}{READY}", "--leave-root"])
+
+
+def movie_source(filename):
+    """Where a file came from, for the app: 'wishlist' / 'laptop' (the laptop agent uploaded it) or 'drive'."""
+    for u in (status.read_laptop() or {}).get("uploaded", []):
+        if u.get("file") == filename:
+            return u.get("source") or "laptop"
+    return "drive"
+
+
+def update_queue(entries, current=None):
+    """Tells the app what's waiting in 'To edit'. Files it hasn't seen before become 'new file' events."""
+    before = {q.get("name") for q in (status.load_state() or {}).get("queue", [])}
+    queue = []
+    for e in entries:
+        if e["Name"] not in before:
+            status.add_event("new_file", "📥 New file in \"To edit\"", e["Name"])
+        if e["Name"] != current:
+            queue.append({"name": e["Name"], "source": movie_source(e["Name"]), "added": e.get("ModTime"),
+                          "size_mb": round(int(e.get("Size", 0) or 0) / 1e6)})
+    status.set_queue(queue)
+
+
 def install_tools():
+    if os.environ.get("INSTALL_TOOLS", "on" if os.environ.get("GITHUB_ACTIONS") == "true" else "off") in OFF:
+        return   # only needed on GitHub's computers
     run(["sudo", "apt-get", "update", "-qq"])
     run(["sudo", "apt-get", "install", "-y", "-qq", "ffmpeg", "fonts-dejavu-core"])
     for d in ["/usr/share/dotnet", "/usr/local/lib/android", "/opt/ghc", "/opt/hostedtoolcache/CodeQL"]:
@@ -1053,37 +1121,48 @@ def install_tools():
     run(["df", "-h", "/"])
 
 
-def process_video(video, all_names):
+OFF = ("off", "no", "0", "false")
+
+
+def process_video(video, all_names, source=None):
     stem = Path(video).stem
     srt_name = next((f for f in all_names if f.lower() == f"{stem.lower()}.srt"), None)
     name = clean_name(video)
     dest = f"{REMOTE}{READY}/{name}"
     labels = ", ".join(MODE_NAMES[m] for m in MODES)
     print(f"\n=== {video} -> {name} ===", flush=True)
+    status.movie_started(name, source or movie_source(video), MODES)
     notify(f"Started: {name}",
            f"Making: {labels}.\nChecking the movie first, then you'll get a message as each part lands in "
-           f"'{READY}/{name}'.", ["clapper"])
+           f"'{READY}/{name}'.", ["clapper"], kind="started")
     shutil.rmtree(WORK, ignore_errors=True)
     (WORK / "in").mkdir(parents=True)
     captions = {}
 
     def on_plan(mode, count, list_file):
         run(["rclone", "copyto", str(list_file), f"{dest}/{MODE_NAMES[mode]}/{list_file.name}"])
+        status.movie_planned(name, mode, count)
         notify(f"{name}: {count} part{'s' if count != 1 else ''} planned",
                f"The parts list is in {READY}/{name}/{MODE_NAMES[mode]}. Parts will appear there as they're made.",
-               ["scissors"])
+               ["scissors"], kind="planned")
 
     def on_part(mode, i, count, out, line):
         folder = f"{READY}/{name}/{MODE_NAMES[mode]}"
+        status.set_stage("uploading", mode=mode, part=i, parts_total=count)
         run(["rclone", "copyto", str(out), f"{REMOTE}{folder}/{out.name}"])
         out.unlink(missing_ok=True)  # free up disk space straight away
         if CAPTIONS_ON and mode not in captions:
             captions[mode] = make_captions(count)
-        caption = f"\n\n📝 Caption:\n{captions[mode][i - 1]}" if mode in captions else ""
+        text = captions[mode][i - 1] if mode in captions else None
+        a, b = PART_TIMES.get((mode, i), (0.0, 0.0))
+        status.part_ready(name, mode, i, a, b, f"{folder}/{out.name}", text)
+        caption = f"\n\n📝 Caption:\n{text}" if text else ""
         notify(f"{name}: Part {i} of {count} ready",
-               f"{line}\nIt's in {folder}.{caption}", ["white_check_mark"] if i == count else ["film_frames"])
+               f"{line}\nIt's in {folder}.{caption}", ["white_check_mark"] if i == count else ["film_frames"],
+               kind="part_ready")
 
     try:
+        status.set_stage("downloading", movie=name, mode=None)
         run(["rclone", "copy", f"{REMOTE}{TO_EDIT}/{video}", str(WORK / "in"), "--stats-one-line", "--stats", "30s"])
         srt = None
         if srt_name:
@@ -1094,14 +1173,15 @@ def process_video(video, all_names):
         if srt_name:
             rc_delete(srt_name)
         summary = ", ".join(f"{MODE_NAMES[m]}: {len(f)} part{'s' if len(f) != 1 else ''}" for m, f in results.items())
-        when = datetime.now(ZoneInfo("Pacific/Auckland")).strftime("%d %b %Y, %I:%M %p")
+        when = datetime.now(TZ).strftime("%d %b %Y, %I:%M %p")
         log_finished(f"{when}  -  {name}  -  {summary}  -  in '{READY}/{name}'  -  "
                      f"subtitles: {SUB_INFO['note'] or 'none (no speech found)'}  (original file: {video})")
         print(f"Done: {name}", flush=True)
+        status.movie_finished(name, SUB_INFO["note"] or "none (no speech found)")
         notify(f"✅ Finished: {name}",
                f"{summary}.\nAll in {READY}/{name}.\n"
                f"🗑️ The big movie file ({video}) was deleted to free up space. "
-               f"It's in Google Drive's bin for 30 days, and listed in {TO_EDIT}/{FINISHED_LOG}.", ["tada"])
+               f"({deleted_where()}). It's listed in {TO_EDIT}/{FINISHED_LOG}.", ["tada"], kind="finished")
     except Exception as e:
         global MODE
         MODE = ""
@@ -1109,7 +1189,9 @@ def process_video(video, all_names):
         rc_move(video, FAILED)
         if srt_name:
             rc_move(srt_name, FAILED)
-        notify(f"❌ Failed: {name}", f"Moved to the '{FAILED}' folder. Any parts already made are kept.\n{e}", ["x"])
+        status.movie_failed(name, e)
+        notify(f"❌ Failed: {name}", f"Moved to the '{FAILED}' folder. Any parts already made are kept.\n{e}", ["x"],
+               kind="failed")
     finally:
         shutil.rmtree(WORK, ignore_errors=True)
 
@@ -1119,16 +1201,23 @@ def main():
     Keeps going until 'To edit' is empty, always taking the oldest file next,
     so movies added while this is running get picked up in the same run.
     """
+    status.run_started(int(os.environ["GITHUB_RUN_ID"]) if os.environ.get("GITHUB_RUN_ID", "").isdigit() else None)
+    cleanup_old_parts()
     tools_ready, tried = False, set()
     while True:
-        entries = [e for e in list_to_edit() if e["Name"] not in tried and (is_video(e) or is_link_file(e))]
+        waiting = [e for e in list_to_edit() if is_video(e) or is_link_file(e)]
+        entries = [e for e in waiting if e["Name"] not in tried]
+        update_queue(entries, entries[0]["Name"] if entries else None)
         if not entries:
             if not tools_ready:
                 print("Nothing in 'To edit'.")
+            status.run_finished()
             return
         if (time.time() - STARTED) / 60 > MAX_RUN_MINUTES:
             print("Time limit reached; the rest will be done in the next run.")
-            notify("Paused for now", f"{len(entries)} file(s) still waiting. They'll be done in the next run.")
+            notify("Paused for now", f"{len(entries)} file(s) still waiting. They'll be done in the next run.",
+                   kind="paused")
+            status.run_finished()
             return
         if not tools_ready:
             install_tools()
@@ -1140,7 +1229,7 @@ def main():
         if is_link_file(nxt):
             for video in fetch_link_file(nxt["Name"]):  # a link's movie goes next, keeping its place in line
                 tried.add(video)
-                process_video(video, all_names + [video])
+                process_video(video, all_names + [video], source="link")
         else:
             process_video(nxt["Name"], all_names)
 
@@ -1152,4 +1241,11 @@ if __name__ == "__main__":
         srt = Path(sys.argv[3]) if len(sys.argv) > 3 else None
         process_local(src, clean_name(src.name), srt, Path("out"), WORK)
     else:
-        main()
+        import signal
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))   # "Cancel run" on GitHub: still save status
+        try:
+            main()
+        except BaseException:
+            status.set_stage("failed")
+            status.run_finished(failed=True)
+            raise

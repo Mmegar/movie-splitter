@@ -8,15 +8,19 @@
  *
  * Setup (one time):
  *   1. Paste this whole file into a new Apps Script project.
- *   2. Project Settings (gear) > Script properties > add GITHUB_TOKEN = your token.
+ *   2. Project Settings (gear) > Script properties > add:
+ *        GITHUB_TOKEN       = your token
+ *        TO_EDIT_FOLDER_ID  = the ID of "TikTok automation v2/To edit" (the part of its link after /folders/)
+ *        GITHUB_OWNER, GITHUB_REPO  only if they differ from the defaults below
  *   3. Pick "setUp" in the function menu at the top and press Run. Allow access.
  *   That's it. To stop it later, run "tearDown".
  */
 
-const OWNER = 'Mmegar';
-const REPO = 'movie-splitter';
+const PROPS = PropertiesService.getScriptProperties();
+const OWNER = PROPS.getProperty('GITHUB_OWNER') || 'Mmegar';
+const REPO = PROPS.getProperty('GITHUB_REPO') || 'movie-splitter-v2';
 const WORKFLOW = 'make-parts.yml';
-const TO_EDIT_FOLDER_ID = '1Mf-bBD8AZofLMk31EQzMlVVlbcDQN5_-';
+const TO_EDIT_FOLDER_ID = PROPS.getProperty('TO_EDIT_FOLDER_ID');   // v2 uses a new Drive folder
 // Extra "To edit" folders next to it (same parent folder) can be added here if ever needed.
 const FOLDERS = [{ name: 'To edit', mode: '' }];
 const VIDEO_EXT = /\.(mkv|mp4|avi|mov|m4v|wmv|webm|mpg|mpeg|ts|ogv|txt)$/i;
@@ -24,6 +28,7 @@ const IGNORE = ['Finished.txt'];                // the splitter's own list of fi
 const TOPIC_FILE = 'notification name.txt';      // private file next to "To edit" holding the ntfy name
 
 function checkForNewVideos() {
+  if (!TO_EDIT_FOLDER_ID) throw new Error('Add TO_EDIT_FOLDER_ID in Project Settings > Script properties.');
   const waiting = waitingFiles();
   const newFiles = rememberNew(waiting);
   if (!waiting.length) return;                  // nothing to do: costs nothing
